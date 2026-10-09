@@ -1,0 +1,31 @@
+# Blueprint de Render: crea el servicio web gratuito de Jarvis.
+# Los valores marcados `sync: false` los escribes tú en el panel de Render al crearlo (no se guardan aquí).
+services:
+  - type: web
+    name: jarvis
+    runtime: python
+    plan: free
+    buildCommand: pip install ".[render]"
+    startCommand: jarvis-server
+    healthCheckPath: /healthz
+    envVars:
+      # Datos: Postgres externo (Render no da disco permanente en el plan gratis)
+      - key: JARVIS_BACKEND
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      # Voz a texto por API (el plan gratis no tiene RAM/CPU para Whisper). Ver docs/DEPLOY.md
+      - key: JARVIS_STT
+        value: api
+      - key: JARVIS_STT_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: JARVIS_STT_MODEL
+        value: whisper-large-v3-turbo
+      - key: JARVIS_STT_API_KEY
+        sync: false
+      # Claude
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Contraseña de la app: Render la genera; la ves en Environment del servicio
+      - key: JARVIS_ACCESS_TOKEN
+        generateValue: true

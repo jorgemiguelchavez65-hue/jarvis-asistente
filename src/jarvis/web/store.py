@@ -150,10 +150,3 @@ class LocalStore:
 
     def discard_audio(self, visit_id: str) -> None:
         shutil.rmtree(self._parts_dir(visit_id), ignore_errors=True)
-
-    def mark_interrupted(self) -> None:
-        """Solo para un servidor único (local): lo que quedó procesándose por un reinicio se reintenta."""
-        for item in self.list():
-            if item["status"] == "processing":
-                self.update(item["id"], status="error",
-                            error="El servidor se reinició durante el proceso. Reintenta.")

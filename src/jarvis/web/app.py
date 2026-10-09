@@ -6,8 +6,8 @@ import logging
 import mimetypes
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -21,7 +21,8 @@ from jarvis.web.pipeline import process_visit
 from jarvis.web.store import LocalStore
 
 log = logging.getLogger("jarvis.app")
-STALE_CLAIM_S = 35 * 60   # > plazo de Cloud Tasks (30 min): un intento anterior ya no puede seguir vivo
+STALE_CLAIM_S = 20 * 60   # un intento que lleva más que esto "procesando" se da por muerto
+RECOVER_GRACE_S = 5 * 60  # al arrancar, lo procesado hace menos que esto se deja en paz
 GIVE_UP_S = 90 * 60       # una visita en cola o procesando más tiempo que esto se muestra como error
 STATIC = Path(__file__).parent / "static"
 MAX_PART = 2 * 1024 * 1024  # un trozo son ~10 s de audio: unas decenas de KB
@@ -42,26 +43,29 @@ class Question(BaseModel):
     image: str | None = Field(default=None, max_length=8_000_000)  # JPEG en base64
 
 
-class RetryLater(Exception):
-    """El intento falló pero quedan reintentos: la ruta interna responde 500 para que Cloud Tasks reintente."""
-
-
 def create_app(config: Config, *, claude, transcriber, background: bool = True, store=None,
-               dispatcher=None, task_verifier: Callable | None = None,
-               tasks_max_attempts: int = 5) -> FastAPI:
+               dispatcher=None) -> FastAPI:
     """`claude` es un anthropic.Anthropic; `transcriber` tiene .transcribe(path).
     `store`: LocalStore por defecto. `dispatcher`: quién pone en marcha el informe (por defecto un hilo,
-    o en línea si background=False). `task_verifier`: si existe, habilita /internal/process (Cloud Tasks)."""
+    o en línea si background=False)."""
     if not config.access_token or len(config.access_token) < 16:
         raise RuntimeError("JARVIS_ACCESS_TOKEN debe existir y tener al menos 16 caracteres.")
 
-    if store is None:
-        store = LocalStore(config.data_dir)
-        store.mark_interrupted()
-    app = FastAPI(title="Jarvis", docs_url=None, redoc_url=None, openapi_url=None)
+    store = store or LocalStore(config.data_dir)
 
-    def handle(visit_id: str, final: bool = True) -> bool:
-        """Procesa una visita en cola. Devuelve False si otro ya la tomó o ya está hecha."""
+    @asynccontextmanager
+    async def lifespan(_app):
+        if background:
+            try:
+                recover_pending()
+            except Exception:  # noqa: BLE001 - un fallo de la base no debe impedir arrancar
+                log.exception("No se pudo retomar el trabajo pendiente")
+        yield
+
+    app = FastAPI(title="Jarvis", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+    def handle(visit_id: str) -> bool:
+        """Procesa una visita en cola. Devuelve False si otro ya la tomó, ya está hecha o falló."""
         if not store.claim(visit_id, STALE_CLAIM_S):
             return False
         try:
@@ -69,20 +73,33 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True, 
                 process_visit(store, visit_id, claude=claude, model=config.model,
                               transcriber=transcriber, keep_audio=config.keep_audio, workdir=Path(tmp))
             return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - el usuario debe ver el fallo y poder reintentar
             log.exception("Fallo procesando la visita %s", visit_id)
-            msg = f"{type(exc).__name__}: {exc}"[:500]
-            if final:
-                store.update(visit_id, status="error", error=msg)
-                return False
-            store.update(visit_id, status="queued", error=f"Reintentando tras un fallo: {msg}")
-            raise RetryLater(msg) from exc
+            store.update(visit_id, status="error", error=f"{type(exc).__name__}: {exc}"[:500])
+            return False
 
     if dispatcher is None:
         dispatcher = ThreadDispatcher(handle) if background else InlineDispatcher(handle)
 
+    def recover_pending() -> int:
+        """Al arrancar: retoma lo que quedó a medias por un reinicio o porque la instancia se durmió."""
+        n = 0
+        for item in store.list():
+            if item["status"] not in ("queued", "processing"):
+                continue
+            v = store.get(item["id"])
+            if v["status"] == "processing":
+                if time.time() - v.get("updated_at", 0) < RECOVER_GRACE_S:
+                    continue  # otra instancia (despliegue en curso) probablemente sigue con ello
+                store.update(item["id"], status="queued")
+            dispatcher.enqueue(item["id"])
+            n += 1
+        return n
+
+    app.state.recover_pending = recover_pending
+
     def auth(request: Request) -> None:
-        # X-Jarvis-Token es la vía principal: Firebase Hosting/Cloud Run pueden consumir Authorization.
+        # X-Jarvis-Token es la vía principal: proxies y pasarelas pueden consumir o reescribir Authorization.
         header = request.headers.get("authorization", "")
         given = request.headers.get("x-jarvis-token") or (header[7:] if header.startswith("Bearer ") else "")
         if not hmac.compare_digest(given.encode(), config.access_token.encode()):
@@ -103,6 +120,10 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True, 
             store.update(visit_id, status="error", error=f"No se pudo iniciar el proceso: {exc}"[:500])
 
     api = Depends(auth)
+
+    @app.get("/healthz")
+    def healthz():
+        return {"ok": True}  # sin datos ni acceso a la base: solo para que Render sepa que está vivo
 
     @app.get("/api/ping", dependencies=[api])
     def ping():
@@ -173,24 +194,6 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True, 
         store.update(visit_id, notes=notes.strip() or visit["notes"])
         launch(visit_id)
         return {"status": store.get(visit_id)["status"]}
-
-    if task_verifier is not None:
-        @app.post("/internal/process/{visit_id}")
-        def process_task(visit_id: str, request: Request):
-            """Lo llama Cloud Tasks (no el teléfono). 5xx = Cloud Tasks reintenta con espera."""
-            task_verifier(request)
-            try:
-                store.get(visit_id)
-            except KeyError:
-                return {"skipped": "visita borrada"}      # 2xx: no tiene sentido reintentar
-            attempt = int(request.headers.get("x-cloudtasks-taskretrycount", "0")) + 1
-            try:
-                ran = handle(visit_id, final=attempt >= tasks_max_attempts)
-            except RetryLater:
-                raise HTTPException(500, "Fallo; se reintentará") from None
-            if not ran and store.get(visit_id)["status"] == "processing":
-                raise HTTPException(500, "Otro intento sigue en curso; se reintentará")
-            return {"processed": ran}
 
     @app.exception_handler(HTTPException)
     async def http_error(_, exc: HTTPException):

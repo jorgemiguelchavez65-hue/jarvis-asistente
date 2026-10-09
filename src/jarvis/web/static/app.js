@@ -49,8 +49,8 @@ async function orphanIds() {
 // ---------- Sesión ----------
 function logout() { localStorage.removeItem("jarvis_token"); token = ""; show("login"); }
 $("login-form").onsubmit = async e => {
-  e.preventDefault(); token = $("token").value.trim(); $("login-err").textContent = "";
-  try { await api("/api/ping"); localStorage.setItem("jarvis_token", token); await home(); }
+  e.preventDefault(); token = $("token").value.trim(); $("login-err").textContent = "Conectando… (si el servidor estaba dormido puede tardar hasta 1 minuto)";
+  try { await api("/api/ping"); $("login-err").textContent = ""; localStorage.setItem("jarvis_token", token); await home(); }
   catch (x) { $("login-err").textContent = "Contraseña incorrecta o sin conexión."; token = ""; }
 };
 $("logout").onclick = logout;
@@ -59,6 +59,7 @@ $("logout").onclick = logout;
 async function home() {
   show("home"); cur = null; clearInterval(pollTimer);
   const list = $("visit-list"); list.textContent = "";
+  const wake = setTimeout(() => { list.innerHTML = '<p class="muted">Conectando… si el servidor estaba dormido (plan gratuito) puede tardar hasta 1 minuto.</p>'; }, 3000);
   try {
     const visits = await api("/api/visits");
     const labels = { open: "abierta", queued: "en cola", processing: "procesando", done: "informe listo", error: "con error" };
@@ -78,6 +79,7 @@ async function home() {
       $("orphans").appendChild(d);
     }
   } catch (x) { list.innerHTML = '<p class="muted">No se pudo cargar la lista (¿sin conexión?).</p>'; }
+  finally { clearTimeout(wake); }
 }
 $("new-form").onsubmit = async e => {
   e.preventDefault(); $("new-err").textContent = "";

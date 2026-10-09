@@ -1,70 +1,70 @@
-# Desplegar Jarvis con Firebase (sin costos fijos de cómputo)
+# Desplegar Jarvis en Render (plan gratis)
 
 ```
-teléfono ─▶ Firebase Hosting (la app)
-                │  /api/**
-                ▼
-           Cloud Run "jarvis"  ── escala a CERO: no hay instancia encendida cuando no lo usas
-             │    ▲   │
-             │    │   └─▶ API de Claude
-  encola     │    │ llama a /internal/process/<visita> con un token firmado
-             ▼    │
-           Cloud Tasks (cola "jarvis-process": 5 intentos, espera creciente)
-
-  Visitas ─▶ Firestore          Audio (temporal) ─▶ Cloud Storage       Claves ─▶ Secret Manager
+teléfono ─▶ Render (servicio web gratuito: la app + la API) ─▶ API de Claude
+                │                                          └─▶ servicio de voz a texto (API)
+                └─▶ Postgres externo (visitas y audio temporal)
 ```
 
-**Qué pasa en una visita:** mientras grabas, el teléfono envía trozos de audio al servicio (se guardan en Cloud Storage). Al terminar, `finish` solo **encola una tarea** y responde al instante. Cloud Tasks despierta el servicio, que transcribe, genera el informe con Claude, lo guarda en Firestore y borra el audio. Si falla, Cloud Tasks reintenta; si agota los intentos, la visita queda en «error» con el motivo y un botón **Reintentar**.
+## Qué cambia respecto a Google Cloud, y por qué
+El plan gratis de Render es muy pequeño (según lo que sé: ~512 MB de RAM, 0.1 CPU) y **no tiene disco permanente**. De eso salen tres decisiones:
 
-## Una aclaración importante
-Cloud Tasks y Firestore **no reemplazan a Cloud Run**: Cloud Tasks solo encola trabajos y Firestore solo guarda datos; algo tiene que ejecutar el código. Lo que elimina el costo fijo es usar Cloud Run **sin instancia mínima** (la versión anterior mantenía una siempre encendida), con Cloud Tasks para que el informe se genere dentro de una petición en vez de en un hilo de fondo.
+| Necesidad | Antes | Ahora | Por qué |
+|---|---|---|---|
+| Voz a texto | Whisper dentro del servidor | **API externa** (`JARVIS_STT=api`) | Whisper no cabe en 512 MB / 0.1 CPU |
+| Guardar visitas | Firestore | **Postgres externo** (Neon, Supabase…) | sin disco permanente, y el Postgres gratis de Render caduca |
+| Informe | Cloud Tasks | **hilo en el servidor** + retoma al arrancar | no hay cola; el estado vive en la base de datos |
 
-## Costos: qué esperar
-- **No hay cómputo encendido**: Cloud Run cobra solo mientras atiende peticiones. Durante una visita, los trozos de audio (uno cada ~10 s) mantienen una instancia activa brevemente, y luego se suma la transcripción. Sigue siendo un costo **por uso**, no fijo.
-- **Casi nada fijo**: la imagen de contenedor ocupa espacio en Artifact Registry y los secretos tienen una tarifa mínima. Son centavos, pero no es cero.
-- Hosting, Firestore, Cloud Storage, Cloud Tasks y Cloud Run tienen cuotas gratuitas; con un solo usuario suele bastar, pero **consulta los precios y cuotas vigentes** y pon una **alerta de presupuesto** en la consola de facturación.
-- El gasto principal real es la **API de Claude**, que no depende de Firebase.
+> **Privacidad — decisión tuya:** con esto, **el audio de la visita sale de tu servidor hacia el proveedor de voz** (antes se transcribía en tu propio servicio). Es lo que hay que ceder para usar el plan gratis. Lee los términos de datos del proveedor que elijas (retención, uso para entrenar) y comprueba que tu empresa lo permite. Si no es aceptable, necesitas una máquina propia con `pip install '.[server]'` y `JARVIS_STT=local`.
+
+## Lo que necesitas (todo con plan gratuito, salvo Claude)
+1. **Cuenta en Render** y este repositorio conectado desde GitHub.
+2. **Postgres gratis**: crea una base en [Neon](https://neon.tech) (o Supabase) y copia su cadena de conexión (`postgresql://…`). No uses el Postgres gratis de Render: caduca a los 30 días y se borra.
+3. **Un servicio de voz compatible con la API de OpenAI.** `render.yaml` viene configurado para **Groq** (`https://api.groq.com/openai/v1`, modelo `whisper-large-v3-turbo`), que tiene nivel gratuito con límites; crea una clave en su consola. Para usar **OpenAI**, cambia `JARVIS_STT_BASE_URL` a `https://api.openai.com/v1` y `JARVIS_STT_MODEL` a `whisper-1` (de pago por minuto). **Comprueba los precios, límites y condiciones vigentes**: no los he podido verificar.
+4. **Clave de la API de Claude** (`ANTHROPIC_API_KEY`). Es el único gasto real del sistema y no es gratis.
 
 ## Pasos
-1. Crea un proyecto en la [consola de Firebase](https://console.firebase.google.com) y activa el plan Blaze (facturación; sin él no se puede usar Cloud Run).
-2. Instala y autentica las herramientas:
-   ```bash
-   gcloud auth login
-   npm install -g firebase-tools && firebase login
-   ```
-3. Desde la raíz del repositorio:
-   ```bash
-   scripts/deploy_firebase.sh ID_DE_TU_PROYECTO
-   ```
-   Habilita las APIs, crea Firestore, el bucket y la cola, guarda los secretos, da permisos, despliega Cloud Run y luego Hosting. Te pedirá la `ANTHROPIC_API_KEY` y **mostrará una sola vez la contraseña de la app**: guárdala.
-4. Abre `https://ID_DE_TU_PROYECTO.web.app` en el teléfono, inicia sesión e instálala:
+1. Sube esta rama a GitHub (o únela a `main`). En Render: **New → Blueprint** y elige el repositorio y la rama: leerá `render.yaml`.
+2. Render te pedirá los valores que no se guardan en el repositorio:
+   - `DATABASE_URL` → la cadena de Neon (debe incluir `sslmode=require`).
+   - `JARVIS_STT_API_KEY` → la clave de Groq/OpenAI.
+   - `ANTHROPIC_API_KEY` → tu clave de Claude.
+3. Espera al despliegue. La **contraseña de la app** la genera Render: está en el servicio → **Environment** → `JARVIS_ACCESS_TOKEN`.
+4. Abre `https://jarvis-XXXX.onrender.com` (la URL aparece arriba en el panel del servicio), inicia sesión e instálala:
    **iPhone (Safari)**: Compartir → «Añadir a pantalla de inicio». **Android (Chrome)**: menú → «Instalar app».
+
+## Límites del plan gratis que vas a notar
+- **El servicio se duerme tras ~15 min sin tráfico y tarda hasta ~1 min en despertar.** **Abre la app 2 minutos antes de entrar a la visita.** Durante una grabación, los trozos de audio (uno cada ~10 s) lo mantienen despierto. La app avisa «Conectando…» mientras despierta.
+- **Si cierras la app justo al terminar**, el informe se genera en segundo plano, pero la instancia puede dormirse antes de acabar. No se pierde nada: el estado está en Postgres y **al volver a abrir la app el servicio despierta y retoma el trabajo** pendiente. Para visitas importantes, espera a ver «informe listo».
+- **Recursos justos**: cada petición de audio es pequeña (trozos de ~40 KB) y el procesamiento pesado lo hace el proveedor de voz, no tu servidor.
+- **Una grabación continua de más de ~90 minutos** supera el límite de archivo habitual de estas APIs (25 MB). Si pasa, la app lo dice; detén la grabación y empieza otra (se suman al mismo informe).
+- **Neon gratis** (0.5 GB): el audio ocupa espacio solo hasta transcribirse y luego se borra. La transcripción y el informe de cada visita son texto y pesan poco.
 
 ## Estado de verificación
 | Pieza | Verificado |
 |---|---|
-| App, API, flujo de grabación por trozos, informe | ✅ tests + navegador con micrófono simulado |
-| Almacén en Firestore (CRUD, concurrencia, toma exclusiva del trabajo) | ✅ contra el **emulador oficial** de Firestore |
-| Reintentos de Cloud Tasks (fallo → 500 → reintento; último intento → error; tarea duplicada; token) | ✅ tests con la cola simulada |
-| Solicitud que se envía a Cloud Tasks (URL, token OIDC, plazo) | ✅ comprobada contra un cliente simulado |
-| Nombres de comandos y banderas de `gcloud` del script | ✅ comprobados con la ayuda de `gcloud` instalada |
-| Cloud Storage real, Cloud Tasks real, token OIDC real, Cloud Run, Hosting, la imagen Docker | ❌ **no probado**: no hay acceso a Google Cloud aquí ni daemon de Docker |
+| API, flujo de grabación por trozos, informe, app en Chromium con micrófono simulado | ✅ tests y prueba de navegador |
+| Almacén Postgres (concurrencia, toma exclusiva del trabajo, tope de audio, persistencia tras reiniciar) | ✅ contra **PostgreSQL 16 real** |
+| Servidor real de punta a punta (Postgres + SDK de Anthropic + transcriptor por API) con servicios falsos por HTTP, **matándolo a mitad del trabajo y reiniciándolo** | ✅ el informe se completa tras el reinicio |
+| Transcriptor por API: formato de la petición, reintentos, errores permanentes, archivo demasiado grande | ✅ tests |
+| `render.yaml` es YAML válido; la instalación `.[render]` no trae Whisper ni torch | ✅ |
+| **Render real, Neon real, Groq/OpenAI real, API real de Claude** (¿acepta mi petición tal cual?) | ❌ **no probado**: aquí no hay acceso a esos servicios |
 
-Lo que queda sin probar es justo la parte que solo se comprueba desplegando. Los puntos con más riesgo de fallar la primera vez: permisos de IAM (el script los otorga, pero Google puede exigir alguno más), la URL del servicio usada como destino y audiencia del token, y los tiempos de transcripción (abajo). Si algo falla, los registros de Cloud Run (`gcloud run services logs read jarvis --region REGION`) dicen qué; pega el error y se corrige.
+El primer despliegue es donde puede aparecer algo: la sintaxis exacta de `render.yaml` (Render cambia campos), la versión de Python de Render, o que Groq rechace el formato del audio del teléfono. Si algo falla, los registros del servicio en Render (pestaña **Logs**) dicen qué; pega el error y se corrige.
 
-## Tiempos: lo primero que debes medir
-- **Cloud Tasks admite como máximo 30 minutos por intento.** Si transcribir una visita larga tarda más, el intento se corta y se reintenta (hasta 5 veces) sin terminar nunca. No sé cuánto tarda el modelo `small` con 4 CPU en Cloud Run; **mide con una grabación de 10 minutos** antes de confiar en visitas de una hora. Si va lento, cambia `ARG WHISPER_MODEL=small` por `base` en el `Dockerfile` (más rápido, algo menos preciso con términos técnicos) y vuelve a desplegar.
-- **Arranque en frío**: tras un rato sin uso, la primera petición tarda unos segundos más (arranca el contenedor). Los trozos de audio se reintentan solos, así que no se pierde nada.
-- Una visita en cola o procesando más de 90 minutos se muestra como error para que no quede colgada.
+## Probar antes de usarlo en una visita real
+1. Abre la app, crea una visita de prueba, graba 2 minutos hablando de un equipo inventado.
+2. Haz una pregunta con foto de cualquier etiqueta.
+3. Pulsa «Terminar» y mide cuánto tarda el informe.
+4. Prueba también el modo avión unos segundos mientras grabas: el audio debe enviarse solo al volver la señal.
+5. Deja la app 20 minutos sin usar y vuelve a abrirla para ver el tiempo de despertar.
 
 ## Seguridad
-- **`--allow-unauthenticated`**: Hosting necesita llamar al servicio. La app está protegida por la contraseña (cabecera `X-Jarvis-Token`; sin ella, 401). `/internal/process` exige además el token OIDC de Cloud Tasks de esa cuenta de servicio específica.
-- Firestore tiene reglas que **niegan todo acceso directo** desde navegadores (`firestore.rules`); solo el servidor accede.
-- El audio se borra tras transcribir, y una regla del bucket borra cualquier resto a los 2 días. La transcripción y el informe quedan en Firestore hasta que borres la visita en la app.
-- Es un servicio de **un solo usuario**: una contraseña compartida, sin cuentas.
+- La app está protegida por una contraseña larga (cabecera `X-Jarvis-Token`; sin ella la API responde 401). Es un servicio de **un solo usuario**.
+- Las claves viven como variables de entorno de Render, nunca en el repositorio ni en el teléfono.
+- El audio se borra de la base al transcribir. La transcripción y el informe quedan hasta que borres la visita en la app.
 
 ## Mantenimiento
-- **Actualizar**: vuelve a ejecutar `scripts/deploy_firebase.sh ID_DE_TU_PROYECTO`.
-- **Cambiar la contraseña**: `printf %s "NUEVA" | gcloud secrets versions add jarvis-token --data-file=-` y vuelve a desplegar.
-- **Ver la cola**: `gcloud tasks queues describe jarvis-process --location REGION`.
-- **Región**: `us-central1` por defecto; si usas otra, cámbiala en `firebase.json` y exporta `REGION=...` al correr el script.
+- **Actualizar**: haz push a la rama conectada; Render redespliega.
+- **Cambiar la contraseña**: edita `JARVIS_ACCESS_TOKEN` en Environment (y vuelve a iniciar sesión en el teléfono).
+- **Volver a Google Cloud (Firebase + Cloud Tasks + Firestore)**: ese despliegue está en el commit `cf84c9e` del historial.

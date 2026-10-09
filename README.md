@@ -13,28 +13,27 @@ Además, en la línea de comandos: rutina diaria (`jarvis agregar`, `jarvis hoy`
 
 ## Cómo está armado
 ```
-teléfono (PWA) ─▶ Firebase Hosting ─▶ Cloud Run (escala a cero) ─▶ API de Claude
-                                         ▲   │ Whisper en el contenedor (voz a texto)
-                       Cloud Tasks ──────┘   ├─ Firestore (visitas)
-                                             └─ Cloud Storage (audio temporal)
+teléfono (PWA) ─▶ Render (servicio web gratuito) ─▶ API de Claude (consultas e informe)
+                        │                       └─▶ API de voz a texto (Groq / OpenAI…)
+                        └─▶ Postgres (Neon…): visitas y audio temporal
 ```
-- La **API key de Claude y la contraseña viven solo en el servidor** (Secret Manager); el teléfono nunca ve la key.
-- La voz se transcribe en tu propio servicio (faster-whisper), no en un tercero. A Claude solo llega **texto** (y las fotos que tú tomes con el botón 📷).
+- La **API key de Claude y la contraseña viven solo en el servidor** (variables de entorno de Render); el teléfono nunca ve la key.
 - El audio se envía por trozos mientras grabas. Si no hay señal, los trozos quedan guardados en el teléfono y se envían solos cuando vuelva la conexión.
-- El informe se genera en una tarea de Cloud Tasks (con reintentos), no durante tu petición, y no hay ninguna instancia encendida esperando.
+- El informe se genera en segundo plano; el estado vive en Postgres, así que si el servicio gratuito se duerme o se reinicia, **retoma el trabajo pendiente** al volver a arrancar.
+- **El audio sale hacia el proveedor de voz** que elijas (el plan gratis no tiene capacidad para transcribir en el propio servidor). Con una máquina propia se puede transcribir en local (`JARVIS_STT=local`, extra `server`).
 
-Despliegue con Firebase, costos y qué está verificado: [docs/DEPLOY.md](docs/DEPLOY.md) (`scripts/deploy_firebase.sh`).
+Despliegue en Render, límites del plan gratis y qué está verificado: [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Estructura
 ```
 src/jarvis/
-  web/            servidor (FastAPI), almacenes (local / Firestore), cola (Cloud Tasks) y app del teléfono (web/static)
+  web/            servidor (FastAPI), almacenes (local / Postgres) y app del teléfono (web/static)
   ai/             Claude: informe de visita y consultas en vivo
-  capture/        voz a texto (Whisper)
+  capture/        voz a texto: por API (Render) o Whisper local
   reports/        modelo y formato del informe
   routine/        tareas diarias (CLI)
-tests/            pytest + e2e_browser.py (Chromium con micrófono simulado)
-Dockerfile
+tests/            pytest + e2e_browser.py (Chromium) + smoke_server.py (servidor real con servicios falsos)
+render.yaml       configuración de Render
 ```
 
 ## Desarrollo local
@@ -43,10 +42,10 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 pytest
 python tests/e2e_browser.py     # requiere: pip install playwright y Chromium
-# contra el emulador de Firestore (requiere Java y firebase-tools):
-firebase emulators:exec --only firestore --project demo-jarvis "pytest tests/test_firestore.py"
-# servidor completo (necesita .env, ver .env.example):
-pip install -e '.[server]' && jarvis servidor
+# contra un Postgres real (opcional):
+TEST_DATABASE_URL=postgresql://usuario@localhost/base pytest tests/test_postgres.py
+# servidor real de punta a punta con servicios falsos (necesita Postgres):
+DATABASE_URL=postgresql://usuario@localhost/base python tests/smoke_server.py
 ```
 Para probar el micrófono en el teléfono hace falta HTTPS (los navegadores bloquean el micrófono en HTTP), así que la prueba real es en la nube o con un túnel HTTPS.
 
@@ -54,10 +53,11 @@ Para probar el micrófono en el teléfono hace falta HTTPS (los navegadores bloq
 - **Pide permiso antes de grabar.** En muchos países grabar a otra persona sin su consentimiento es ilegal. La app te obliga a confirmarlo al crear cada visita.
 - **Política de tu empresa.** Si trabajas para una empresa, confirma que puedes enviar conversaciones de clientes a servicios externos (Anthropic, tu proveedor de hosting).
 - **Datos de pacientes**: Jarvis tiene instrucciones de omitirlos del informe, pero la transcripción completa se guarda en el servidor hasta que borres la visita (botón «Borrar» en la app). El audio se elimina tras transcribir.
-- **Contraseña**: `JARVIS_ACCESS_TOKEN` (en Secret Manager) es la única barrera. Usa una larga (`jarvis token`) y no la compartas. Es un servicio de **un solo usuario**.
+- **Contraseña**: `JARVIS_ACCESS_TOKEN` (variable de entorno de Render) es la única barrera. Usa una larga (`jarvis token`) y no la compartas. Es un servicio de **un solo usuario**.
 - **Revisa siempre «Por verificar»**: el reconocimiento de voz y Claude pueden equivocarse en nombres de equipos, referencias y cifras.
 
 ## Límites conocidos
 - **Pantalla encendida mientras grabas.** Los navegadores del teléfono pueden detener el micrófono si bloqueas la pantalla o cambias de app. La app mantiene la pantalla encendida y avisa si detecta una interrupción, pero no puede evitarla.
 - **iPhone**: la grabación usa el formato del navegador (MP4/AAC). Está contemplado pero no se ha probado en un iPhone real; pruébalo antes de depender de él.
-- El informe tarda unos minutos en visitas largas (depende del CPU del servidor y del modelo `JARVIS_WHISPER_MODEL`).
+- **El plan gratis de Render se duerme** tras ~15 min sin uso y tarda hasta ~1 min en despertar: abre la app antes de la visita.
+- El informe tarda unos minutos en visitas largas.

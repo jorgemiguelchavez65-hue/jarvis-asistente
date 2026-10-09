@@ -50,7 +50,7 @@ with sync_playwright() as p:
     page.goto("http://127.0.0.1:8099/")
 
     page.fill("#token", "mala-contrasena-xxxxxxxx"); page.click("#login-form button")
-    page.wait_for_selector("#login-err:not(:empty)")
+    page.wait_for_function("document.getElementById('login-err').textContent.includes('incorrecta')")
     page.fill("#token", TOKEN); page.click("#login-form button")
     page.wait_for_selector("#home:not([hidden])")
 

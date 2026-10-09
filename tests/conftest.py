@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from jarvis.config import Config
@@ -7,10 +9,9 @@ from fakes import TOKEN, FakeClaude, FakeTranscriber
 
 @pytest.fixture
 def config(tmp_path):
-    return Config(data_dir=tmp_path, anthropic_api_key="x", model="m", access_token=TOKEN,
-                  whisper_model="tiny", keep_audio=False, max_audio_mb=1, backend="local", gcp_project=None, audio_bucket=None,
-                  tasks_queue="q", tasks_location="us-central1", tasks_sa=None, service_url=None,
-                  tasks_max_attempts=5)
+    return dataclasses.replace(Config.load(), data_dir=tmp_path, anthropic_api_key="x", model="m",
+                               access_token=TOKEN, keep_audio=False, max_audio_mb=1,
+                               backend="local", stt="local")
 
 
 @pytest.fixture
