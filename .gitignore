@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.egg-info/
+.pytest_cache/
+# Datos personales y médicos: nunca al repositorio
+data/*
+!data/.gitkeep
+informes/
