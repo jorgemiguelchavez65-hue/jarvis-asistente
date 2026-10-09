@@ -5,18 +5,35 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jarvis"
 version = "0.1.0"
-description = "Asistente personal: rutina diaria, informes de visitas médicas y (pronto) Claude."
+description = "Asistente personal: copiloto de visitas a médicos y laboratorios (grabación, consultas con Claude e informe) y rutina diaria."
 requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
+# Cada extra lista sus dependencias de forma explícita: referenciar "jarvis[...]" desde dentro de
+# jarvis rompe a Poetry ("depends on both jarvis[...] (*) and jarvis[...] (<empty>)").
 ai = ["anthropic>=0.40"]
 audio = ["faster-whisper>=1.0"]
 web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "httpx>=0.27"]
 postgres = ["psycopg[binary]>=3.1", "psycopg_pool>=3.2"]
-render = ["jarvis[ai,web,postgres]"]  # sin Whisper local: el plan gratis no lo soporta
-server = ["jarvis[ai,audio,web]"]  # todo en una máquina propia, voz local
-dev = ["pytest>=8", "httpx>=0.27", "jarvis[ai,web,postgres]"]
+# Render (plan gratis): sin Whisper local, que no cabe en esa máquina.
+render = [
+    "anthropic>=0.40",
+    "fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "httpx>=0.27",
+    "psycopg[binary]>=3.1", "psycopg_pool>=3.2",
+]
+# Máquina propia: voz local con Whisper y archivos en disco.
+server = [
+    "anthropic>=0.40",
+    "faster-whisper>=1.0",
+    "fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "httpx>=0.27",
+]
+dev = [
+    "pytest>=8",
+    "anthropic>=0.40",
+    "fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "httpx>=0.27",
+    "psycopg[binary]>=3.1", "psycopg_pool>=3.2",
+]
 
 [project.scripts]
 jarvis = "jarvis.cli:main"
