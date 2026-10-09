@@ -11,14 +11,21 @@ dependencies = []
 
 [project.optional-dependencies]
 ai = ["anthropic>=0.40"]
-audio = ["faster-whisper>=1.0", "sounddevice>=0.4"]
-dev = ["pytest>=8"]
+audio = ["faster-whisper>=1.0"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+server = ["jarvis[ai,audio,web]"]
+dev = ["pytest>=8", "httpx>=0.27", "jarvis[ai,web]"]
 
 [project.scripts]
 jarvis = "jarvis.cli:main"
+jarvis-server = "jarvis.web.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"jarvis.web" = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]

@@ -1,47 +1,58 @@
 # Jarvis
 
-Asistente personal en Python.
+Asistente personal en Python. Su función principal: **copiloto de visitas** a médicos y laboratorios, desde el teléfono y sin computadora.
 
-## Funciones
-- **Rutina diaria**: tareas con hora (`jarvis agregar`, `jarvis hoy`, `jarvis hecho`).
-- **Informes de visitas médicas**: genera Markdown en `informes/` (`jarvis informe`).
-- **Copiloto de visita**: `jarvis visita --grabar` graba, transcribe en local (Whisper) y Claude arma el informe, marcando lo dudoso en «Por verificar». También acepta `--audio` o `--transcripcion`.
-- **Consultas en vivo**: `jarvis copiloto --lan` abre una página para el teléfono (mismo Wi-Fi) donde escribes o fotografías un equipo/reactivo y Jarvis responde al momento. Las consultas se añaden solas al informe de `jarvis visita` de ese día.
-- **Claude**: `jarvis preguntar "..."` — requiere `ANTHROPIC_API_KEY`.
+## Qué hace
+En el teléfono (app web instalable, funciona en iPhone y Android):
+1. **Grabas la visita** (con pausa). El audio se guarda en el teléfono mientras grabas, por trozos.
+2. **Preguntas en el momento**: escribes o fotografías un equipo/reactivo y Jarvis te explica qué es.
+3. **Terminas** y Jarvis transcribe el audio, junta transcripción + notas + consultas y genera el **informe**: resumen, equipos y reactivos tratados, necesidades, compromisos, próximos pasos y una sección «Por verificar» con lo dudoso.
+4. Copias, compartes o descargas el informe.
+
+Además, en la línea de comandos: rutina diaria (`jarvis agregar`, `jarvis hoy`, `jarvis hecho`).
+
+## Cómo está armado
+```
+teléfono (PWA) ──HTTPS──▶ servidor Jarvis (tu nube) ──▶ API de Claude (consultas e informe)
+                              └─ Whisper local en el servidor (voz a texto)
+```
+- La **API key de Claude y la contraseña viven solo en el servidor**; el teléfono nunca ve la key.
+- La voz se transcribe en tu servidor (faster-whisper), no en un tercero. A Claude solo llega **texto** (y las fotos que tú tomes con el botón 📷).
+- Si no hay señal, el audio queda guardado en el teléfono y se envía al terminar cuando vuelva la conexión.
+
+Despliegue paso a paso: [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Estructura
 ```
 src/jarvis/
-  cli.py          comandos
-  config.py       rutas y variables de entorno
-  storage.py      persistencia JSON
-  routine/        tareas y rutina
-  reports/        informes médicos
-  ai/             cliente de Claude
-tests/
-data/             datos locales (ignorado por git)
+  web/            servidor (FastAPI) y app del teléfono (web/static)
+  ai/             Claude: informe de visita y consultas en vivo
+  capture/        voz a texto (Whisper)
+  reports/        modelo y formato del informe
+  routine/        tareas diarias (CLI)
+tests/            pytest + e2e_browser.py (Chromium con micrófono simulado)
+Dockerfile
 ```
 
-## Inicio rápido
+## Desarrollo local
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'          # extras: ai (Claude), audio (grabar y transcribir)
+pip install -e '.[dev]'
 pytest
-jarvis agregar "Tomar medicación" --hora 08:00
-jarvis hoy
-jarvis informe --medico "Dra. Pérez" --especialidad Cardiología --motivo Control
+python tests/e2e_browser.py     # requiere: pip install playwright y Chromium
+# servidor completo (necesita .env, ver .env.example):
+pip install -e '.[server]' && jarvis servidor
 ```
+Para probar el micrófono en el teléfono hace falta HTTPS (los navegadores bloquean el micrófono en HTTP), así que la prueba real es en la nube o con un túnel HTTPS.
 
-`data/` e `informes/` están en `.gitignore` porque contienen datos personales y médicos.
+## Privacidad y consentimiento — léelo antes de usarlo con clientes
+- **Pide permiso antes de grabar.** En muchos países grabar a otra persona sin su consentimiento es ilegal. La app te obliga a confirmarlo al crear cada visita.
+- **Política de tu empresa.** Si trabajas para una empresa, confirma que puedes enviar conversaciones de clientes a servicios externos (Anthropic, tu proveedor de hosting).
+- **Datos de pacientes**: Jarvis tiene instrucciones de omitirlos del informe, pero la transcripción completa se guarda en el servidor hasta que borres la visita (botón «Borrar» en la app). El audio se elimina tras transcribir.
+- **Contraseña**: `JARVIS_ACCESS_TOKEN` es la única barrera. Usa una larga (`jarvis token`) y no la compartas. Es un servicio de **un solo usuario**.
+- **Revisa siempre «Por verificar»**: el reconocimiento de voz y Claude pueden equivocarse en nombres de equipos, referencias y cifras.
 
-## Privacidad y consentimiento
-- Pide siempre permiso al médico antes de grabar; en muchos países es obligatorio. `--grabar` lo pregunta.
-- El audio se transcribe en tu equipo y se borra al terminar (salvo `--conservar-audio`).
-- Solo el **texto** de la transcripción se envía a la API de Claude. Revisa la política de datos de tu cuenta de Anthropic antes de usarlo con información médica real.
-- Claude puede equivocarse con dosis o nombres de fármacos: revisa siempre la sección «Por verificar».
-
-### Copiloto en el teléfono
-- `--lan` abre el puerto a tu red Wi-Fi; el enlace lleva un token aleatorio y cambia cada vez. Úsalo solo en redes de confianza (no en el Wi-Fi público del hospital).
-- La página usa HTTP, así que el micrófono del navegador no está disponible: usa el dictado del teclado del teléfono.
-- Las fotos se reducen y se envían a Claude. Evita fotografiar documentos con tus datos personales.
-- Jarvis explica equipos y términos; no da diagnósticos ni sustituye al médico.
+## Límites conocidos
+- **Pantalla encendida mientras grabas.** Los navegadores del teléfono pueden detener el micrófono si bloqueas la pantalla o cambias de app. La app mantiene la pantalla encendida y avisa si detecta una interrupción, pero no puede evitarla.
+- **iPhone**: la grabación usa el formato del navegador (MP4/AAC). Está contemplado pero no se ha probado en un iPhone real; pruébalo antes de depender de él.
+- El informe tarda unos minutos en visitas largas (depende del CPU del servidor y del modelo `JARVIS_WHISPER_MODEL`).

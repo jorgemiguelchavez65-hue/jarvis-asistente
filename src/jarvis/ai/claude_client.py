@@ -1,4 +1,4 @@
-"""Cliente de la API de Claude (esqueleto para la fase 2)."""
+"""Acceso a la API de Claude."""
 from __future__ import annotations
 
 from jarvis.config import Config
@@ -17,27 +17,13 @@ class ClaudeClient:
         try:
             import anthropic
         except ImportError as exc:
-            raise ClaudeNotConfigured(
-                "Instala el extra de IA: pip install -e '.[ai]'"
-            ) from exc
-        self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-        self._model = config.model
-
-    def live_assistant(self):
-        from jarvis.ai.live_assistant import LiveAssistant
-
-        return LiveAssistant(self._client, self._model)
-
-    def visit_from_transcript(self, transcript: str, date: str):
-        from jarvis.ai.visit_extractor import extract_visit
-
-        return extract_visit(self._client, self._model, transcript, date)
+            raise ClaudeNotConfigured("Instala el extra de IA: pip install -e '.[ai]'") from exc
+        self.raw = anthropic.Anthropic(api_key=config.anthropic_api_key, timeout=120.0)
+        self.model = config.model
 
     def ask(self, question: str, system: str = "Eres Jarvis, un asistente personal útil y conciso.") -> str:
-        response = self._client.messages.create(
-            model=self._model,
-            max_tokens=1024,
-            system=system,
+        response = self.raw.messages.create(
+            model=self.model, max_tokens=1024, system=system,
             messages=[{"role": "user", "content": question}],
         )
         return "".join(b.text for b in response.content if b.type == "text")
