@@ -23,6 +23,11 @@ class ClaudeClient:
         self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
         self._model = config.model
 
+    def visit_from_transcript(self, transcript: str, date: str):
+        from jarvis.ai.visit_extractor import extract_visit
+
+        return extract_visit(self._client, self._model, transcript, date)
+
     def ask(self, question: str, system: str = "Eres Jarvis, un asistente personal útil y conciso.") -> str:
         response = self._client.messages.create(
             model=self._model,

@@ -14,6 +14,7 @@ class MedicalVisit:
     diagnosis: str = ""
     medications: list[str] = field(default_factory=list)
     follow_up: str = ""
+    to_verify: list[str] = field(default_factory=list)
 
 
 def render_report(visit: MedicalVisit) -> str:
@@ -31,4 +32,6 @@ def render_report(visit: MedicalVisit) -> str:
         lines += ["", "## Medicación", ""] + [f"- {m}" for m in visit.medications]
     if visit.follow_up:
         lines += ["", "## Seguimiento", "", visit.follow_up]
+    if visit.to_verify:
+        lines += ["", "## Por verificar con el médico", ""] + [f"- {v}" for v in visit.to_verify]
     return "\n".join(lines) + "\n"

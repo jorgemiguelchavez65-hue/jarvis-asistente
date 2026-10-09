@@ -35,9 +35,60 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--medicacion", action="append", default=[])
     rep.add_argument("--seguimiento", default="")
 
+    vis = sub.add_parser("visita", help="Copiloto de visita: audio/transcripción -> informe con Claude")
+    src = vis.add_mutually_exclusive_group(required=True)
+    src.add_argument("--grabar", action="store_true", help="Grabar del micrófono hasta Ctrl+C")
+    src.add_argument("--audio", type=Path, help="Archivo de audio ya grabado")
+    src.add_argument("--transcripcion", type=Path, help="Archivo de texto con la transcripción")
+    vis.add_argument("--fecha", default=date.today().isoformat())
+    vis.add_argument("--conservar-audio", action="store_true", help="No borrar el audio al terminar")
+    vis.add_argument("--yo-confirmo-consentimiento", action="store_true",
+                     help="Saltar la pregunta de consentimiento de grabación")
+
     ask = sub.add_parser("preguntar", help="Preguntar a Claude (requiere API key)")
     ask.add_argument("pregunta")
     return p
+
+
+def run_visit(args, config: Config) -> int:
+    from jarvis.ai import ClaudeClient, ClaudeNotConfigured
+
+    try:
+        claude = ClaudeClient(config)  # falla pronto, antes de grabar nada
+    except ClaudeNotConfigured as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    audio: Path | None = args.audio
+    if args.grabar:
+        if not args.yo_confirmo_consentimiento:
+            ok = input("¿El médico sabe y acepta que se grabe la consulta? [s/N] ")
+            if ok.strip().lower() not in ("s", "si", "sí"):
+                print("Cancelado: sin consentimiento no se graba.")
+                return 1
+        from jarvis.capture import record_until_interrupt
+
+        audio = record_until_interrupt(config.data_dir / f"visita_{args.fecha}.wav")
+
+    if audio:
+        from jarvis.capture import WhisperTranscriber
+
+        print("Transcribiendo localmente…")
+        transcript = WhisperTranscriber().transcribe(audio)
+        if args.grabar and not args.conservar_audio:
+            audio.unlink(missing_ok=True)
+    else:
+        transcript = args.transcripcion.read_text(encoding="utf-8")
+
+    print("Generando informe con Claude…")
+    visit = claude.visit_from_transcript(transcript, args.fecha)
+    config.reports_dir.mkdir(parents=True, exist_ok=True)
+    out = config.reports_dir / f"visita_{visit.date}.md"
+    out.write_text(render_report(visit), encoding="utf-8")
+    print(f"Informe guardado en {out}")
+    if visit.to_verify:
+        print(f"Atención: {len(visit.to_verify)} punto(s) por verificar con el médico.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         out = config.reports_dir / f"visita_{visit.date}.md"
         out.write_text(render_report(visit), encoding="utf-8")
         print(f"Informe guardado en {out}")
+    elif args.command == "visita":
+        return run_visit(args, config)
     elif args.command == "preguntar":
         from jarvis.ai import ClaudeClient, ClaudeNotConfigured
 
