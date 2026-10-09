@@ -23,6 +23,11 @@ class ClaudeClient:
         self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
         self._model = config.model
 
+    def live_assistant(self):
+        from jarvis.ai.live_assistant import LiveAssistant
+
+        return LiveAssistant(self._client, self._model)
+
     def visit_from_transcript(self, transcript: str, date: str):
         from jarvis.ai.visit_extractor import extract_visit
 

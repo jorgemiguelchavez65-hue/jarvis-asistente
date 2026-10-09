@@ -45,9 +45,42 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--yo-confirmo-consentimiento", action="store_true",
                      help="Saltar la pregunta de consentimiento de grabación")
 
+    live = sub.add_parser("copiloto", help="Servidor para preguntar desde el teléfono durante la visita")
+    live.add_argument("--puerto", type=int, default=8765)
+    live.add_argument("--fecha", default=date.today().isoformat())
+    live.add_argument("--lan", action="store_true",
+                      help="Aceptar conexiones de tu Wi-Fi (necesario para el teléfono)")
+
     ask = sub.add_parser("preguntar", help="Preguntar a Claude (requiere API key)")
     ask.add_argument("pregunta")
     return p
+
+
+def run_copilot(args, config: Config) -> int:
+    import secrets
+
+    from jarvis.ai import ClaudeClient, ClaudeNotConfigured
+    from jarvis.server import lan_ip, make_server
+
+    try:
+        assistant = ClaudeClient(config).live_assistant()
+    except ClaudeNotConfigured as exc:
+        print(f"Error: {exc}")
+        return 1
+    token = secrets.token_urlsafe(16)
+    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    server = make_server(assistant, token, config.data_dir / f"copiloto_{args.fecha}.json",
+                         host, args.puerto)
+    where = lan_ip() if args.lan else "127.0.0.1"
+    print(f"Abre en el teléfono: http://{where}:{args.puerto}/?t={token}")
+    if not args.lan:
+        print("(Sin --lan solo funciona en este equipo.)")
+    print("Ctrl+C para terminar. Las consultas se guardan y se añaden al informe de la visita.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 def run_visit(args, config: Config) -> int:
@@ -82,6 +115,10 @@ def run_visit(args, config: Config) -> int:
 
     print("Generando informe con Claude…")
     visit = claude.visit_from_transcript(transcript, args.fecha)
+    consultas = config.data_dir / f"copiloto_{args.fecha}.json"
+    if consultas.exists():
+        visit.consulted = JsonStore(consultas).load([])
+        print(f"Incluidas {len(visit.consulted)} consulta(s) del copiloto en vivo.")
     config.reports_dir.mkdir(parents=True, exist_ok=True)
     out = config.reports_dir / f"visita_{visit.date}.md"
     out.write_text(render_report(visit), encoding="utf-8")
@@ -120,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         out = config.reports_dir / f"visita_{visit.date}.md"
         out.write_text(render_report(visit), encoding="utf-8")
         print(f"Informe guardado en {out}")
+    elif args.command == "copiloto":
+        return run_copilot(args, config)
     elif args.command == "visita":
         return run_visit(args, config)
     elif args.command == "preguntar":
