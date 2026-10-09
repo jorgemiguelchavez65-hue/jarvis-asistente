@@ -1,4 +1,5 @@
 {
+  "firestore": { "rules": "firestore.rules" },
   "hosting": {
     "public": "src/jarvis/web/static",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],

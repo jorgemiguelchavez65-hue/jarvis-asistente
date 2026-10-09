@@ -2,6 +2,7 @@
 
     python tests/e2e_browser.py
 """
+import dataclasses
 import os
 import shutil
 import sys
@@ -20,8 +21,9 @@ from jarvis.config import Config
 from jarvis.web.app import create_app
 
 data = Path(tempfile.mkdtemp())
-config = Config(data_dir=data, anthropic_api_key="x", model="m", access_token=TOKEN,
-                whisper_model="tiny", keep_audio=False, max_audio_mb=20)
+config = dataclasses.replace(Config.load(), data_dir=data, anthropic_api_key="x", model="m",
+                            access_token=TOKEN, keep_audio=False, max_audio_mb=20)
+
 class SizingTranscriber(FakeTranscriber):
     sizes = []
 

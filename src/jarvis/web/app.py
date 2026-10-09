@@ -2,20 +2,27 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import mimetypes
-import threading
+import tempfile
+import time
 from pathlib import Path
+from typing import Callable
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jarvis.ai.live_assistant import ask_live
 from jarvis.config import Config
+from jarvis.web.dispatch import InlineDispatcher, ThreadDispatcher
 from jarvis.web.pipeline import process_visit
-from jarvis.web.store import VisitStore
+from jarvis.web.store import LocalStore
 
+log = logging.getLogger("jarvis.app")
+STALE_CLAIM_S = 35 * 60   # > plazo de Cloud Tasks (30 min): un intento anterior ya no puede seguir vivo
+GIVE_UP_S = 90 * 60       # una visita en cola o procesando más tiempo que esto se muestra como error
 STATIC = Path(__file__).parent / "static"
 MAX_PART = 2 * 1024 * 1024  # un trozo son ~10 s de audio: unas decenas de KB
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -35,15 +42,44 @@ class Question(BaseModel):
     image: str | None = Field(default=None, max_length=8_000_000)  # JPEG en base64
 
 
-def create_app(config: Config, *, claude, transcriber, background: bool = True) -> FastAPI:
+class RetryLater(Exception):
+    """El intento falló pero quedan reintentos: la ruta interna responde 500 para que Cloud Tasks reintente."""
+
+
+def create_app(config: Config, *, claude, transcriber, background: bool = True, store=None,
+               dispatcher=None, task_verifier: Callable | None = None,
+               tasks_max_attempts: int = 5) -> FastAPI:
     """`claude` es un anthropic.Anthropic; `transcriber` tiene .transcribe(path).
-    `background=False` ejecuta el proceso en línea (para los tests)."""
+    `store`: LocalStore por defecto. `dispatcher`: quién pone en marcha el informe (por defecto un hilo,
+    o en línea si background=False). `task_verifier`: si existe, habilita /internal/process (Cloud Tasks)."""
     if not config.access_token or len(config.access_token) < 16:
         raise RuntimeError("JARVIS_ACCESS_TOKEN debe existir y tener al menos 16 caracteres.")
 
-    store = VisitStore(config.data_dir)
-    store.mark_interrupted()
+    if store is None:
+        store = LocalStore(config.data_dir)
+        store.mark_interrupted()
     app = FastAPI(title="Jarvis", docs_url=None, redoc_url=None, openapi_url=None)
+
+    def handle(visit_id: str, final: bool = True) -> bool:
+        """Procesa una visita en cola. Devuelve False si otro ya la tomó o ya está hecha."""
+        if not store.claim(visit_id, STALE_CLAIM_S):
+            return False
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                process_visit(store, visit_id, claude=claude, model=config.model,
+                              transcriber=transcriber, keep_audio=config.keep_audio, workdir=Path(tmp))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Fallo procesando la visita %s", visit_id)
+            msg = f"{type(exc).__name__}: {exc}"[:500]
+            if final:
+                store.update(visit_id, status="error", error=msg)
+                return False
+            store.update(visit_id, status="queued", error=f"Reintentando tras un fallo: {msg}")
+            raise RetryLater(msg) from exc
+
+    if dispatcher is None:
+        dispatcher = ThreadDispatcher(handle) if background else InlineDispatcher(handle)
 
     def auth(request: Request) -> None:
         # X-Jarvis-Token es la vía principal: Firebase Hosting/Cloud Run pueden consumir Authorization.
@@ -59,13 +95,12 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
             raise HTTPException(404, "Visita no encontrada") from None
 
     def launch(visit_id: str) -> None:
-        store.update(visit_id, status="processing", error="")
-        job = lambda: process_visit(store, visit_id, claude=claude, model=config.model,  # noqa: E731
-                                    transcriber=transcriber, keep_audio=config.keep_audio)
-        if background:
-            threading.Thread(target=job, daemon=True).start()
-        else:
-            job()
+        store.update(visit_id, status="queued", error="")
+        try:
+            dispatcher.enqueue(visit_id)
+        except Exception as exc:  # noqa: BLE001 - p. ej. la cola no responde: que el usuario pueda reintentar
+            log.exception("No se pudo encolar %s", visit_id)
+            store.update(visit_id, status="error", error=f"No se pudo iniciar el proceso: {exc}"[:500])
 
     api = Depends(auth)
 
@@ -85,7 +120,11 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
 
     @app.get("/api/visits/{visit_id}", dependencies=[api])
     def get_visit(visit_id: str):
-        return visit_or_404(visit_id)
+        v = visit_or_404(visit_id)
+        if v["status"] in ("queued", "processing") and time.time() - v.get("updated_at", 0) > GIVE_UP_S:
+            v = store.update(visit_id, status="error",
+                             error="El proceso tardó demasiado y se detuvo. Pulsa Reintentar.")
+        return v
 
     @app.delete("/api/visits/{visit_id}", dependencies=[api])
     def delete_visit(visit_id: str):
@@ -127,31 +166,31 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
         return {"ok": True}
 
     @app.post("/api/visits/{visit_id}/finish", dependencies=[api])
-    async def finish(visit_id: str, notes: str = Form(default=""), audio: UploadFile | None = File(default=None)):
+    def finish(visit_id: str, notes: str = Form(default="")):
         visit = visit_or_404(visit_id)
-        if visit["status"] == "processing":
+        if visit["status"] in ("queued", "processing"):
             raise HTTPException(409, "Esta visita ya se está procesando.")
-        if audio is not None and audio.filename != "":
-            ext = AUDIO_EXT.get((audio.content_type or "").split(";")[0].strip())
-            if ext is None:
-                raise HTTPException(415, "Formato de audio no admitido.")
-            limit = config.max_audio_mb * 1024 * 1024
-            for old in store.audio_dir.glob(f"{visit_id}.upload.*"):
-                old.unlink(missing_ok=True)  # una subida completa reemplaza a la anterior
-            dest = store.audio_dir / f"{visit_id}.upload.{ext}"
-            size = 0
-            with dest.open("wb") as out:
-                while chunk := await audio.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > limit:
-                        out.close()
-                        dest.unlink(missing_ok=True)
-                        raise HTTPException(413, f"El audio supera {config.max_audio_mb} MB.")
-                    out.write(chunk)
-        store.assemble_parts(visit_id)
         store.update(visit_id, notes=notes.strip() or visit["notes"])
         launch(visit_id)
-        return {"status": "processing"}
+        return {"status": store.get(visit_id)["status"]}
+
+    if task_verifier is not None:
+        @app.post("/internal/process/{visit_id}")
+        def process_task(visit_id: str, request: Request):
+            """Lo llama Cloud Tasks (no el teléfono). 5xx = Cloud Tasks reintenta con espera."""
+            task_verifier(request)
+            try:
+                store.get(visit_id)
+            except KeyError:
+                return {"skipped": "visita borrada"}      # 2xx: no tiene sentido reintentar
+            attempt = int(request.headers.get("x-cloudtasks-taskretrycount", "0")) + 1
+            try:
+                ran = handle(visit_id, final=attempt >= tasks_max_attempts)
+            except RetryLater:
+                raise HTTPException(500, "Fallo; se reintentará") from None
+            if not ran and store.get(visit_id)["status"] == "processing":
+                raise HTTPException(500, "Otro intento sigue en curso; se reintentará")
+            return {"processed": ran}
 
     @app.exception_handler(HTTPException)
     async def http_error(_, exc: HTTPException):

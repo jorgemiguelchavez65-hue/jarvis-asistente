@@ -13,20 +13,22 @@ Además, en la línea de comandos: rutina diaria (`jarvis agregar`, `jarvis hoy`
 
 ## Cómo está armado
 ```
-teléfono (PWA) ─▶ Firebase Hosting ─▶ Cloud Run (servidor Jarvis) ─▶ API de Claude
-                                          ├─ Whisper en el contenedor (voz a texto)
-                                          └─ Cloud Storage (visitas y audio)
+teléfono (PWA) ─▶ Firebase Hosting ─▶ Cloud Run (escala a cero) ─▶ API de Claude
+                                         ▲   │ Whisper en el contenedor (voz a texto)
+                       Cloud Tasks ──────┘   ├─ Firestore (visitas)
+                                             └─ Cloud Storage (audio temporal)
 ```
-- La **API key de Claude y la contraseña viven solo en el servidor**; el teléfono nunca ve la key.
+- La **API key de Claude y la contraseña viven solo en el servidor** (Secret Manager); el teléfono nunca ve la key.
 - La voz se transcribe en tu propio servicio (faster-whisper), no en un tercero. A Claude solo llega **texto** (y las fotos que tú tomes con el botón 📷).
 - El audio se envía por trozos mientras grabas. Si no hay señal, los trozos quedan guardados en el teléfono y se envían solos cuando vuelva la conexión.
+- El informe se genera en una tarea de Cloud Tasks (con reintentos), no durante tu petición, y no hay ninguna instancia encendida esperando.
 
-Despliegue con Firebase paso a paso: [docs/DEPLOY.md](docs/DEPLOY.md) (`scripts/deploy_firebase.sh`).
+Despliegue con Firebase, costos y qué está verificado: [docs/DEPLOY.md](docs/DEPLOY.md) (`scripts/deploy_firebase.sh`).
 
 ## Estructura
 ```
 src/jarvis/
-  web/            servidor (FastAPI) y app del teléfono (web/static)
+  web/            servidor (FastAPI), almacenes (local / Firestore), cola (Cloud Tasks) y app del teléfono (web/static)
   ai/             Claude: informe de visita y consultas en vivo
   capture/        voz a texto (Whisper)
   reports/        modelo y formato del informe
@@ -41,6 +43,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 pytest
 python tests/e2e_browser.py     # requiere: pip install playwright y Chromium
+# contra el emulador de Firestore (requiere Java y firebase-tools):
+firebase emulators:exec --only firestore --project demo-jarvis "pytest tests/test_firestore.py"
 # servidor completo (necesita .env, ver .env.example):
 pip install -e '.[server]' && jarvis servidor
 ```

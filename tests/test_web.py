@@ -1,9 +1,12 @@
-import io
-
 from fastapi.testclient import TestClient
 
 from jarvis.web.app import create_app
 from fakes import TOKEN, FakeClaude, FakeTranscriber
+
+
+def put_audio(client, vid, data=b"fake-audio", session=1, seq=0):
+    return client.put(f"/api/visits/{vid}/audio/{session}/{seq}", content=data,
+                      headers={"Content-Type": "audio/webm;codecs=opus"})
 
 
 def new_visit(client, **kw):
@@ -45,8 +48,8 @@ def test_full_flow_audio_questions_notes_report(client, config):
     ask = client.post(f"/api/visits/{vid}/ask", json={"question": "¿Qué es un XR-200?", "image": "AAAA"})
     assert ask.json()["answer"].startswith("Es un analizador")
 
-    r = client.post(f"/api/visits/{vid}/finish", data={"notes": "Pidió precio"},
-                    files={"audio": ("v", io.BytesIO(b"fake-audio"), "audio/webm;codecs=opus")})
+    assert put_audio(client, vid).status_code == 200
+    r = client.post(f"/api/visits/{vid}/finish", data={"notes": "Pidió precio"})
     assert r.status_code == 200
     v = client.get(f"/api/visits/{vid}").json()
     assert v["status"] == "done", v["error"]
@@ -60,8 +63,8 @@ def test_full_flow_audio_questions_notes_report(client, config):
 def test_report_prompt_includes_all_sources(client, fake_claude):
     vid = new_visit(client).json()["id"]
     client.post(f"/api/visits/{vid}/ask", json={"question": "¿HbA1c?"})
-    client.post(f"/api/visits/{vid}/finish", data={"notes": "nota-clave"},
-                files={"audio": ("v", io.BytesIO(b"x"), "audio/webm")})
+    put_audio(client, vid)
+    client.post(f"/api/visits/{vid}/finish", data={"notes": "nota-clave"})
     prompt = fake_claude.calls[-1]["messages"][0]["content"]
     assert "Clínica Norte" in prompt and "nota-clave" in prompt and "¿HbA1c?" in prompt
     assert "XR-200" in prompt  # la transcripción
@@ -71,15 +74,6 @@ def test_finish_without_audio_uses_notes_and_questions(client):
     vid = new_visit(client).json()["id"]
     client.post(f"/api/visits/{vid}/finish", data={"notes": "solo notas"})
     assert client.get(f"/api/visits/{vid}").json()["status"] == "done"
-
-
-def test_bad_audio_type_and_size_rejected(client):
-    vid = new_visit(client).json()["id"]
-    bad = client.post(f"/api/visits/{vid}/finish", files={"audio": ("v", io.BytesIO(b"x"), "text/html")})
-    assert bad.status_code == 415
-    big = client.post(f"/api/visits/{vid}/finish",
-                      files={"audio": ("v", io.BytesIO(b"0" * (2 * 1024 * 1024)), "audio/webm")})
-    assert big.status_code == 413
 
 
 def test_failure_is_reported_and_retry_reuses_transcript(config):
@@ -96,7 +90,8 @@ def test_failure_is_reported_and_retry_reuses_transcript(config):
     c = TestClient(create_app(config, claude=Flaky(), transcriber=tr, background=False))
     c.headers["Authorization"] = f"Bearer {TOKEN}"
     vid = new_visit(c).json()["id"]
-    c.post(f"/api/visits/{vid}/finish", files={"audio": ("v", io.BytesIO(b"x"), "audio/webm")})
+    put_audio(c, vid, b"x")
+    c.post(f"/api/visits/{vid}/finish")
     v = c.get(f"/api/visits/{vid}").json()
     assert v["status"] == "error" and "API caída" in v["error"]
     assert v["transcript"]                      # la transcripción no se pierde
@@ -132,7 +127,7 @@ def test_chunks_are_joined_in_order_per_session(config):
 
     class Spy(FakeTranscriber):
         def transcribe(self, path):
-            seen[path.name.split(".", 1)[1]] = path.read_bytes()
+            seen[path.name] = path.read_bytes()
             return f"texto{len(seen)}"
 
     c = TestClient(create_app(config, claude=FakeClaude(), transcriber=Spy(), background=False))
@@ -146,7 +141,7 @@ def test_chunks_are_joined_in_order_per_session(config):
     c.post(f"/api/visits/{vid}/finish", data={"notes": ""})
     v = c.get(f"/api/visits/{vid}").json()
     assert v["status"] == "done", v["error"]
-    assert sorted(seen.values()) == [b"A1", b"B1B2"]       # cada sesión es un archivo, en orden
+    assert list(seen.values()) == [b"A1", b"B1B2"]         # una sesión por archivo, en orden de sesión; trozos en orden de secuencia
     assert v["transcript"] == "texto1\ntexto2"
     assert not (config.data_dir / "audio" / vid).exists()  # los trozos se limpian al unir
     assert list((config.data_dir / "audio").iterdir()) == []

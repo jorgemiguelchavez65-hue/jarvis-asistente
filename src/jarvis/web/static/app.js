@@ -61,7 +61,7 @@ async function home() {
   const list = $("visit-list"); list.textContent = "";
   try {
     const visits = await api("/api/visits");
-    const labels = { open: "abierta", processing: "procesando", done: "informe listo", error: "con error" };
+    const labels = { open: "abierta", queued: "en cola", processing: "procesando", done: "informe listo", error: "con error" };
     visits.forEach(v => {
       const li = document.createElement("li");
       const t = document.createElement("div"); t.textContent = v.client;
@@ -239,15 +239,15 @@ $("finish").onclick = async () => {
 function showReport() {
   show("report"); clearInterval(pollTimer);
   const render = () => {
-    const processing = cur.status === "processing", err = cur.status === "error", ok = cur.status === "done";
-    $("r-status").textContent = processing ? "Procesando… esto puede tardar unos minutos según la duración. Puedes salir y volver." : err ? "Algo falló: " + cur.error : "";
+    const processing = cur.status === "processing" || cur.status === "queued", err = cur.status === "error", ok = cur.status === "done";
+    $("r-status").textContent = processing ? "Procesando… esto puede tardar unos minutos según la duración. Puedes salir y volver." + (cur.error ? " (" + cur.error + ")" : "") : err ? "Algo falló: " + cur.error : "";
     $("r-md").textContent = ok ? cur.report_md : ""; $("r-md").hidden = !ok;
     $("r-actions").hidden = !ok; $("r-share").hidden = !navigator.share;
     $("r-retry").hidden = !err;
   };
   render();
-  if (cur.status === "processing") pollTimer = setInterval(async () => {
-    try { cur = await api("/api/visits/" + cur.id); render(); if (cur.status !== "processing") clearInterval(pollTimer); } catch (x) { /* sigue intentando */ }
+  if (cur.status === "processing" || cur.status === "queued") pollTimer = setInterval(async () => {
+    try { cur = await api("/api/visits/" + cur.id); render(); if (cur.status !== "processing" && cur.status !== "queued") clearInterval(pollTimer); } catch (x) { /* sigue intentando */ }
   }, 3000);
 }
 $("r-retry").onclick = async () => {
