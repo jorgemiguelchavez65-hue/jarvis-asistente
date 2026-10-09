@@ -13,14 +13,15 @@ Además, en la línea de comandos: rutina diaria (`jarvis agregar`, `jarvis hoy`
 
 ## Cómo está armado
 ```
-teléfono (PWA) ──HTTPS──▶ servidor Jarvis (tu nube) ──▶ API de Claude (consultas e informe)
-                              └─ Whisper local en el servidor (voz a texto)
+teléfono (PWA) ─▶ Firebase Hosting ─▶ Cloud Run (servidor Jarvis) ─▶ API de Claude
+                                          ├─ Whisper en el contenedor (voz a texto)
+                                          └─ Cloud Storage (visitas y audio)
 ```
 - La **API key de Claude y la contraseña viven solo en el servidor**; el teléfono nunca ve la key.
-- La voz se transcribe en tu servidor (faster-whisper), no en un tercero. A Claude solo llega **texto** (y las fotos que tú tomes con el botón 📷).
-- Si no hay señal, el audio queda guardado en el teléfono y se envía al terminar cuando vuelva la conexión.
+- La voz se transcribe en tu propio servicio (faster-whisper), no en un tercero. A Claude solo llega **texto** (y las fotos que tú tomes con el botón 📷).
+- El audio se envía por trozos mientras grabas. Si no hay señal, los trozos quedan guardados en el teléfono y se envían solos cuando vuelva la conexión.
 
-Despliegue paso a paso: [docs/DEPLOY.md](docs/DEPLOY.md).
+Despliegue con Firebase paso a paso: [docs/DEPLOY.md](docs/DEPLOY.md) (`scripts/deploy_firebase.sh`).
 
 ## Estructura
 ```
@@ -49,7 +50,7 @@ Para probar el micrófono en el teléfono hace falta HTTPS (los navegadores bloq
 - **Pide permiso antes de grabar.** En muchos países grabar a otra persona sin su consentimiento es ilegal. La app te obliga a confirmarlo al crear cada visita.
 - **Política de tu empresa.** Si trabajas para una empresa, confirma que puedes enviar conversaciones de clientes a servicios externos (Anthropic, tu proveedor de hosting).
 - **Datos de pacientes**: Jarvis tiene instrucciones de omitirlos del informe, pero la transcripción completa se guarda en el servidor hasta que borres la visita (botón «Borrar» en la app). El audio se elimina tras transcribir.
-- **Contraseña**: `JARVIS_ACCESS_TOKEN` es la única barrera. Usa una larga (`jarvis token`) y no la compartas. Es un servicio de **un solo usuario**.
+- **Contraseña**: `JARVIS_ACCESS_TOKEN` (en Secret Manager) es la única barrera. Usa una larga (`jarvis token`) y no la compartas. Es un servicio de **un solo usuario**.
 - **Revisa siempre «Por verificar»**: el reconocimiento de voz y Claude pueden equivocarse en nombres de equipos, referencias y cifras.
 
 ## Límites conocidos

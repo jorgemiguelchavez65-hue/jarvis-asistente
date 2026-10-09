@@ -17,6 +17,7 @@ from jarvis.web.pipeline import process_visit
 from jarvis.web.store import VisitStore
 
 STATIC = Path(__file__).parent / "static"
+MAX_PART = 2 * 1024 * 1024  # un trozo son ~10 s de audio: unas decenas de KB
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 AUDIO_EXT = {"audio/webm": "webm", "audio/mp4": "mp4", "audio/ogg": "ogg", "audio/mpeg": "mp3",
              "audio/wav": "wav", "audio/x-m4a": "m4a", "video/webm": "webm"}
@@ -45,8 +46,9 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
     app = FastAPI(title="Jarvis", docs_url=None, redoc_url=None, openapi_url=None)
 
     def auth(request: Request) -> None:
+        # X-Jarvis-Token es la vía principal: Firebase Hosting/Cloud Run pueden consumir Authorization.
         header = request.headers.get("authorization", "")
-        given = header[7:] if header.startswith("Bearer ") else ""
+        given = request.headers.get("x-jarvis-token") or (header[7:] if header.startswith("Bearer ") else "")
         if not hmac.compare_digest(given.encode(), config.access_token.encode()):
             raise HTTPException(401, "No autorizado")
 
@@ -105,6 +107,25 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
         store.append_consulted(visit_id, item)
         return item
 
+    @app.put("/api/visits/{visit_id}/audio/{session}/{seq}", dependencies=[api])
+    async def put_audio_part(visit_id: str, session: int, seq: int, request: Request):
+        visit = visit_or_404(visit_id)
+        if visit["status"] not in ("open", "error"):
+            raise HTTPException(409, "Esta visita ya no admite audio.")
+        if not (0 <= session < 10**13 and 0 <= seq < 10**6):
+            raise HTTPException(400, "Trozo inválido.")
+        ext = AUDIO_EXT.get((request.headers.get("content-type") or "").split(";")[0].strip())
+        if ext is None:
+            raise HTTPException(415, "Formato de audio no admitido.")
+        data = await request.body()
+        if not data or len(data) > MAX_PART:
+            raise HTTPException(413 if data else 400, "Trozo vacío o demasiado grande.")
+        try:
+            store.save_part(visit_id, session, seq, ext, data, config.max_audio_mb * 1024 * 1024)
+        except ValueError:
+            raise HTTPException(413, f"El audio supera {config.max_audio_mb} MB.") from None
+        return {"ok": True}
+
     @app.post("/api/visits/{visit_id}/finish", dependencies=[api])
     async def finish(visit_id: str, notes: str = Form(default=""), audio: UploadFile | None = File(default=None)):
         visit = visit_or_404(visit_id)
@@ -115,9 +136,9 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
             if ext is None:
                 raise HTTPException(415, "Formato de audio no admitido.")
             limit = config.max_audio_mb * 1024 * 1024
-            for f in store.audio_files(visit_id):
-                f.unlink(missing_ok=True)
-            dest = store.audio_dir / f"{visit_id}.{ext}"
+            for old in store.audio_dir.glob(f"{visit_id}.upload.*"):
+                old.unlink(missing_ok=True)  # una subida completa reemplaza a la anterior
+            dest = store.audio_dir / f"{visit_id}.upload.{ext}"
             size = 0
             with dest.open("wb") as out:
                 while chunk := await audio.read(1024 * 1024):
@@ -127,6 +148,7 @@ def create_app(config: Config, *, claude, transcriber, background: bool = True) 
                         dest.unlink(missing_ok=True)
                         raise HTTPException(413, f"El audio supera {config.max_audio_mb} MB.")
                     out.write(chunk)
+        store.assemble_parts(visit_id)
         store.update(visit_id, notes=notes.strip() or visit["notes"])
         launch(visit_id)
         return {"status": "processing"}

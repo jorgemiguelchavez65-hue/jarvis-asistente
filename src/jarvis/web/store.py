@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import shutil
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -74,9 +75,47 @@ class VisitStore:
         self._path(visit_id).unlink(missing_ok=True)
         for f in self.audio_dir.glob(f"{visit_id}.*"):
             f.unlink(missing_ok=True)
+        shutil.rmtree(self.audio_dir / visit_id, ignore_errors=True)
 
     def audio_files(self, visit_id: str) -> list[Path]:
         return sorted(self.audio_dir.glob(f"{visit_id}.*"))
+
+    # --- audio por trozos: <audio>/<visita>/<sesion>_<seq>.<ext> ---
+    def parts_dir(self, visit_id: str) -> Path:
+        self._path(visit_id)  # valida el id
+        return self.audio_dir / visit_id
+
+    def save_part(self, visit_id: str, session: int, seq: int, ext: str, data: bytes,
+                  max_total: int) -> None:
+        d = self.parts_dir(visit_id)
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / f"{session:013d}_{seq:06d}.{ext}"
+        with self._lock:
+            used = sum(f.stat().st_size for f in d.iterdir() if f != target)
+            if used + len(data) > max_total:
+                raise ValueError("limit")
+            tmp = target.with_suffix(".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(target)  # reenviar el mismo trozo lo sobrescribe: es idempotente
+
+    def assemble_parts(self, visit_id: str) -> int:
+        """Une los trozos de cada sesión de grabación en un archivo por sesión. Devuelve cuántos."""
+        d = self.parts_dir(visit_id)
+        if not d.exists():
+            return 0
+        sessions: dict[str, list[Path]] = {}
+        for f in sorted(d.glob("*_*.*")):
+            if f.suffix != ".tmp":
+                sessions.setdefault(f.name.split("_")[0], []).append(f)
+        base = len(self.audio_files(visit_id))
+        for i, key in enumerate(sorted(sessions)):
+            files = sessions[key]
+            out = self.audio_dir / f"{visit_id}.{base + i:03d}.{files[0].suffix[1:]}"
+            with out.open("wb") as fh:
+                for f in files:  # el nombre lleva la secuencia con ceros: orden lexicográfico correcto
+                    fh.write(f.read_bytes())
+        shutil.rmtree(d, ignore_errors=True)
+        return len(sessions)
 
     def mark_interrupted(self) -> None:
         """Al arrancar: lo que quedó 'processing' por un reinicio se marca para reintentar."""

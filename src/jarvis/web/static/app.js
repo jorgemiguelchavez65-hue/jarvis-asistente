@@ -12,7 +12,7 @@ function fmt(sec) { const m = Math.floor(sec / 60), s = Math.floor(sec % 60); re
 
 // ---------- API ----------
 async function api(path, opts = {}) {
-  const headers = Object.assign({ Authorization: "Bearer " + token }, opts.headers || {});
+  const headers = Object.assign({ "X-Jarvis-Token": token }, opts.headers || {});
   if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   if (r.status === 401) { logout(); throw new Error("Sesión no válida"); }
@@ -32,19 +32,15 @@ function idb() {
 }
 const tx = (db, mode) => db.transaction("chunks", mode).objectStore("chunks");
 const done = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-async function putChunk(visit, mime, blob) { const db = await idb(); await done(tx(db, "readwrite").add({ visit, mime, blob })); }
-async function getChunks(visit) {
-  const db = await idb();
-  const keys = await done(tx(db, "readonly").index("visit").getAllKeys(visit));
-  const out = [];
-  for (const k of keys) out.push(await done(tx(db, "readonly").get(k)));
+async function putChunk(rec) { const db = await idb(); await done(tx(db, "readwrite").add(rec)); }
+async function getChunks(visit) {          // [{key, visit, session, seq, mime, blob}] en orden de llegada
+  const db = await idb(), s = tx(db, "readonly"), idx = s.index("visit");
+  const keys = await done(idx.getAllKeys(visit)), out = [];
+  for (const k of keys) out.push(Object.assign({ key: k }, await done(tx(db, "readonly").get(k))));
   return out;
 }
-async function clearChunks(visit) {
-  const db = await idb(); const s = tx(db, "readwrite");
-  const keys = await done(s.index("visit").getAllKeys(visit));
-  for (const k of keys) await done(s.delete(k));
-}
+async function delChunk(key) { const db = await idb(); await done(tx(db, "readwrite").delete(key)); }
+async function clearChunks(visit) { for (const c of await getChunks(visit)) await delChunk(c.key); }
 async function orphanIds() {
   const db = await idb(); const all = await done(tx(db, "readonly").getAll());
   return [...new Set(all.map(c => c.visit))];
@@ -101,8 +97,9 @@ async function openVisit(id) {
   $("notes").value = cur.notes || ""; $("chat").textContent = "";
   cur.consulted.forEach(c => { addMsg("q", (c.photo ? "📷 " : "") + c.question); addMsg("a", c.answer); });
   setRecUi("idle");
-  const saved = await getChunks(id);
-  if (saved.length) $("rec-msg").textContent = "Hay audio guardado de esta visita en el teléfono; se enviará al terminar.";
+  const left = (await getChunks(id)).length;
+  setSync(left);
+  if (left) { $("rec-msg").textContent = "Hay audio de esta visita guardado en el teléfono; se está enviando."; flush(id); }
 }
 function addMsg(cls, text) {
   const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = text;
@@ -110,6 +107,30 @@ function addMsg(cls, text) {
 }
 $("back").onclick = async () => { if (rec && !confirm("La grabación sigue activa. ¿Salir? Se detendrá.")) return; await stopRec(); home(); };
 $("back2").onclick = home;
+
+// ---------- Envío de audio por trozos (mientras grabas) ----------
+let flushing = null;
+function setSync(n) { $("sync").textContent = n ? "☁ " + n + " trozo(s) de audio por enviar" : "☁ audio al día"; }
+// Envía en orden los trozos guardados. Devuelve cuántos quedan sin enviar.
+function flush(visitId) {
+  const run = async () => {
+    let left = (await getChunks(visitId)).length;
+    for (const c of await getChunks(visitId)) {
+      try {
+        const r = await fetch("/api/visits/" + visitId + "/audio/" + c.session + "/" + c.seq,
+          { method: "PUT", headers: { "X-Jarvis-Token": token, "Content-Type": c.mime.split(";")[0] }, body: c.blob });
+        if (r.status === 401) { logout(); break; }
+        if (r.ok || [400, 404, 409, 413, 415].includes(r.status)) { await delChunk(c.key); left--; if (!r.ok) $("v-err").textContent = "Un trozo de audio fue rechazado por el servidor (" + r.status + ")."; }
+        else break;
+      } catch (x) { break; }       // sin red: se reintenta luego, el trozo sigue guardado
+    }
+    return left;
+  };
+  flushing = (flushing || Promise.resolve()).then(run, run);
+  return flushing.then(n => { if (cur && cur.id === visitId) setSync(n); return n; });
+}
+async function flushAll() { for (const id of await orphanIds()) await flush(id); }
+addEventListener("online", () => { netUi(); flushAll(); });
 
 // ---------- Grabación ----------
 function setRecUi(state) {
@@ -131,8 +152,16 @@ async function startRec() {
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(m => MediaRecorder.isTypeSupported(m)) || "";
   const recorder = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : { audioBitsPerSecond: 32000 });
   const id = cur.id;
-  rec = { recorder, stream, acc: 0, since: Date.now(), mime: recorder.mimeType || mime || "audio/webm", interrupted: false, wake: null };
-  recorder.ondataavailable = e => { if (e.data && e.data.size) putChunk(id, rec ? rec.mime : "audio/webm", e.data).catch(() => { $("v-err").textContent = "No se pudo guardar el audio en el teléfono (¿poco espacio?)."; }); };
+  // Cada pulsación de «Grabar» es una sesión (su propio archivo de audio); los trozos llevan un número de orden.
+  rec = { recorder, stream, acc: 0, since: Date.now(), mime: recorder.mimeType || mime || "audio/webm", interrupted: false, wake: null,
+          session: Date.now(), seq: 0, pending: Promise.resolve() };
+  const me = rec;
+  recorder.ondataavailable = e => {
+    if (!e.data || !e.data.size) return;
+    const item = { visit: id, session: me.session, seq: me.seq++, mime: me.mime, blob: e.data };
+    me.pending = me.pending.then(() => putChunk(item)).then(() => flush(id))
+      .catch(() => { $("v-err").textContent = "No se pudo guardar el audio en el teléfono (¿poco espacio?)."; });
+  };
   stream.getAudioTracks()[0].onended = () => { if (rec) { rec.interrupted = true; $("rec-msg").textContent = "⚠ El micrófono se cortó. Detén y vuelve a grabar."; } };
   recorder.start(10000);   // un trozo cada 10 s, guardado al instante
   rec.timer = setInterval(tick, 500);
@@ -148,7 +177,7 @@ function stopRec() {
   return new Promise(resolve => {
     if (!rec) return resolve();
     const r = rec; rec = null; clearInterval(r.timer);
-    r.recorder.onstop = () => { r.stream.getTracks().forEach(t => t.stop()); if (r.wake) r.wake.release().catch(() => {}); resolve(); };
+    r.recorder.onstop = () => { r.stream.getTracks().forEach(t => t.stop()); if (r.wake) r.wake.release().catch(() => {}); r.pending.then(resolve); };
     if (r.recorder.state !== "inactive") r.recorder.stop(); else r.recorder.onstop();
     setRecUi("idle");
   });
@@ -192,26 +221,15 @@ $("ask-form").onsubmit = async e => {
 };
 
 // ---------- Terminar ----------
-function upload(id, form) {
-  return new Promise((res, rej) => {
-    const x = new XMLHttpRequest();
-    x.open("POST", "/api/visits/" + id + "/finish");
-    x.setRequestHeader("Authorization", "Bearer " + token);
-    x.upload.onprogress = e => { if (e.lengthComputable) $("finish").textContent = "Enviando… " + Math.round(100 * e.loaded / e.total) + "%"; };
-    x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText); } catch (e) {} x.status < 300 ? res(d) : rej(new Error(d.error || "Error " + x.status)); };
-    x.onerror = () => rej(new Error("Sin conexión. El audio sigue guardado en el teléfono; reintenta cuando tengas señal."));
-    x.send(form);
-  });
-}
 $("finish").onclick = async () => {
   const btn = $("finish"); btn.disabled = true; $("v-err").textContent = "";
   try {
     await stopRec();
-    const chunks = await getChunks(cur.id), form = new FormData();
-    form.append("notes", $("notes").value);
-    if (chunks.length) form.append("audio", new Blob(chunks.map(c => c.blob), { type: chunks[0].mime }), "visita");
-    await upload(cur.id, form);
-    await clearChunks(cur.id);          // solo se borra el audio local si el servidor ya lo recibió
+    btn.textContent = "Enviando audio…";
+    const left = await flush(cur.id);
+    if (left) throw new Error("Faltan " + left + " trozo(s) de audio por enviar. Revisa tu conexión y vuelve a pulsar; el audio sigue guardado en el teléfono.");
+    const form = new FormData(); form.append("notes", $("notes").value);
+    await api("/api/visits/" + cur.id + "/finish", { method: "POST", body: form });
     cur = await api("/api/visits/" + cur.id); showReport();
   } catch (x) { $("v-err").textContent = x.message; }
   finally { btn.disabled = false; btn.textContent = "Terminar y generar informe"; }
@@ -248,10 +266,11 @@ $("r-del").onclick = async () => {
 };
 
 // ---------- Arranque ----------
-const netUi = () => $("net").hidden = navigator.onLine;
-addEventListener("online", netUi); addEventListener("offline", netUi); netUi();
+function netUi() { $("net").hidden = navigator.onLine; }
+addEventListener("offline", netUi); netUi();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 (async () => {
   if (!token) return show("login");
   try { await api("/api/ping"); await home(); } catch (x) { if (token) home(); }
+  flushAll();
 })();

@@ -61,6 +61,11 @@ with sync_playwright() as p:
     page.click("#rec-start")
     page.wait_for_selector("#rec-stop:not([hidden])")
     page.wait_for_timeout(int(float(os.environ.get("REC_SECONDS", "3.5")) * 1000))
+    # Con grabación en curso, los trozos de 10 s ya deben estar en el servidor (no al final).
+    if float(os.environ.get("REC_SECONDS", "3.5")) >= 12:
+        parts = [f for d in (data / "audio").iterdir() if d.is_dir() for f in d.iterdir()]
+        assert len(parts) >= 1, "el audio no se está enviando mientras se graba"
+        print("trozos ya en el servidor antes de terminar:", len(parts))
     page.fill("#q", "¿Qué es un XR-200?"); page.click("#ask-form button")
     page.wait_for_function("document.querySelectorAll('.msg.a').length>0 && document.querySelector('.msg.a').textContent.includes('analizador')")
     page.click("#rec-pause"); page.wait_for_timeout(300); page.click("#rec-pause")

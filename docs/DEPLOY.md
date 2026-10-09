@@ -1,48 +1,52 @@
-# Desplegar Jarvis en la nube
+# Desplegar Jarvis con Firebase
 
-Necesitas un servidor con **HTTPS**, **un volumen persistente** y **2 GB de RAM** (el modelo de voz `small` los usa; con `base` bastan 1 GB). La imagen se construye con el `Dockerfile` del repositorio. Los pasos de abajo usan Fly.io como ejemplo; cualquier servicio que ejecute un contenedor con volumen sirve (Railway, Render con disco, un VPS con Caddy…).
+```
+teléfono ─▶ Firebase Hosting (app, HTTPS, CDN)
+                 │  /api/**  (reescritura)
+                 ▼
+            Cloud Run "jarvis" ─▶ API de Claude
+                 │   └─ Whisper (voz a texto) dentro del contenedor
+                 ▼
+            Cloud Storage (bucket montado en /data: visitas y audio)
+            Secret Manager (ANTHROPIC_API_KEY y contraseña de la app)
+```
+Firebase Hosting sirve la app; todo lo que tiene lógica corre en Cloud Run, que es como Firebase ejecuta contenedores. Por eso hace falta un **proyecto de Firebase en el plan Blaze** (con facturación).
 
-> Estos pasos **no se han ejecutado** aún contra un servicio real. Si algún comando ha cambiado, la documentación de tu proveedor manda.
+> **Estado:** estos archivos (`firebase.json`, `Dockerfile`, `scripts/deploy_firebase.sh`) **no se han ejecutado contra un proyecto real**; no había acceso a Google Cloud al escribirlos. Lo que sí está probado es la aplicación (tests y un navegador con micrófono simulado). Si un comando falla, pega aquí el error y se corrige.
 
-## Reglas que cualquier proveedor debe cumplir
-1. **Una sola instancia** (los datos están en un volumen local).
-2. **Que no se apague por inactividad** mientras procesa: el informe se genera en segundo plano, sin conexión abierta. Si el proveedor detiene la máquina cuando no hay peticiones, perderás el proceso (la app lo marca como «error» y permite reintentar).
-3. El volumen montado en `/data`.
+## Pasos
+1. Crea un proyecto en la [consola de Firebase](https://console.firebase.google.com) y activa el plan Blaze.
+2. Instala y autentica las dos herramientas:
+   ```bash
+   gcloud auth login
+   npm install -g firebase-tools && firebase login
+   ```
+3. Desde la raíz del repositorio:
+   ```bash
+   scripts/deploy_firebase.sh ID_DE_TU_PROYECTO
+   ```
+   El script habilita las APIs, crea el bucket y los secretos, da permisos, despliega Cloud Run y luego Hosting. Te pedirá la `ANTHROPIC_API_KEY` y **mostrará una sola vez la contraseña de la app**: guárdala.
+4. Abre `https://ID_DE_TU_PROYECTO.web.app` en el teléfono, inicia sesión e instálala:
+   **iPhone (Safari)**: Compartir → «Añadir a pantalla de inicio». **Android (Chrome)**: menú → «Instalar app».
 
-## Ejemplo con Fly.io
+La primera construcción tarda varios minutos (descarga el modelo de voz y lo guarda dentro de la imagen).
+
+## Por qué está configurado así
+- **Una instancia, siempre encendida, con CPU permanente** (`--min-instances 1 --max-instances 1 --no-cpu-throttling`): el informe se genera en segundo plano después de responder a la app. Con el comportamiento por defecto de Cloud Run (CPU solo durante las peticiones) ese proceso se congelaría. **Esto tiene un costo continuo** aunque no uses la app: revisa los precios de Cloud Run antes de dejarlo activo.
+- **Bucket montado en `/data`**: Cloud Run no tiene disco permanente, y así el código guarda visitas y audio igual que en local. Es un sistema de archivos sobre Cloud Storage, no un disco: sirve para este volumen de datos con un solo usuario, no para mucha concurrencia.
+- **Audio por trozos mientras grabas**: Firebase Hosting corta las peticiones a los 60 s, y subir un audio entero al final, con mala señal, podría pasarse. Por eso el teléfono envía trozos de ~10 s durante la grabación y al terminar solo falta enviar lo último.
+- **`--allow-unauthenticated`**: Hosting necesita poder llamar al servicio. La protección es la contraseña de la app (cabecera `X-Jarvis-Token`); sin ella la API responde 401. Los datos no son públicos, pero **la URL de Cloud Run sí es alcanzable**, así que usa una contraseña larga.
+- **Región**: `us-central1` por defecto. Si usas otra, cámbiala en `firebase.json` y exporta `REGION=...` al correr el script. Elige una región cercana a ti por latencia.
+
+## Verificar
 ```bash
-fly launch --no-deploy --name tu-jarvis          # detecta el Dockerfile
-fly volumes create jarvis_data --size 3
-fly secrets set ANTHROPIC_API_KEY=sk-ant-... JARVIS_ACCESS_TOKEN="$(jarvis token)"
+curl -s https://ID_DE_TU_PROYECTO.web.app/api/ping -H "X-Jarvis-Token: TU_CONTRASEÑA"   # {"ok":true}
+curl -s -o /dev/null -w "%{http_code}\n" https://ID_DE_TU_PROYECTO.web.app/api/visits     # 401
 ```
-Edita el `fly.toml` generado para que incluya:
-```toml
-[mounts]
-  source = "jarvis_data"
-  destination = "/data"
+Después haz una visita de prueba contigo mismo: graba 2 minutos hablando de un equipo inventado, haz una pregunta con foto y revisa el informe. Prueba también el modo avión unos segundos mientras grabas: el audio debe enviarse solo al volver la señal.
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = "off"
-  min_machines_running = 1
-
-[[vm]]
-  memory = "2gb"
-  cpu_kind = "shared"
-  cpus = 2
-```
-```bash
-fly deploy
-```
-Guarda la contraseña que imprimió `jarvis token`: es la que escribirás en la app.
-
-## Instalarla en el teléfono
-1. Abre `https://tu-jarvis.fly.dev` en el teléfono e inicia sesión con la contraseña.
-2. **iPhone (Safari)**: Compartir → «Añadir a pantalla de inicio». **Android (Chrome)**: menú → «Instalar app».
-3. Acepta el permiso de micrófono la primera vez que grabes.
-
-La primera transcripción es lenta: descarga el modelo de voz (queda guardado en el volumen).
-
-## Antes de usarlo en una visita real
-Haz una visita de prueba contigo mismo: graba 2 minutos hablando de un equipo inventado, haz una pregunta con foto y revisa el informe. Prueba también con el modo avión durante unos segundos para ver que el audio no se pierde.
+## Mantenimiento
+- **Actualizar**: vuelve a ejecutar `scripts/deploy_firebase.sh ID_DE_TU_PROYECTO`.
+- **Cambiar la contraseña**: `printf %s "NUEVA" | gcloud secrets versions add jarvis-token --data-file=-` y vuelve a desplegar.
+- **Borrar datos**: botón «Borrar» en cada visita, o vaciar el bucket `ID_DE_TU_PROYECTO-jarvis-data`.
+- **Costo y datos**: el audio se borra tras transcribir, pero la transcripción y el informe quedan en el bucket hasta que borres la visita.

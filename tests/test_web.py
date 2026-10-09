@@ -114,3 +114,57 @@ def test_delete_removes_visit(client):
     vid = new_visit(client).json()["id"]
     assert client.delete(f"/api/visits/{vid}").status_code == 200
     assert client.get(f"/api/visits/{vid}").status_code == 404
+
+
+def put(client, vid, session, seq, data=b"x", ctype="audio/webm;codecs=opus"):
+    return client.put(f"/api/visits/{vid}/audio/{session}/{seq}", content=data,
+                      headers={"Content-Type": ctype})
+
+
+def test_token_header_works_and_bearer_still_does(client, config):
+    anon = TestClient(client.app)
+    assert anon.get("/api/visits", headers={"X-Jarvis-Token": TOKEN}).status_code == 200
+    assert anon.get("/api/visits", headers={"X-Jarvis-Token": "mal"}).status_code == 401
+
+
+def test_chunks_are_joined_in_order_per_session(config):
+    seen = {}
+
+    class Spy(FakeTranscriber):
+        def transcribe(self, path):
+            seen[path.name.split(".", 1)[1]] = path.read_bytes()
+            return f"texto{len(seen)}"
+
+    c = TestClient(create_app(config, claude=FakeClaude(), transcriber=Spy(), background=False))
+    c.headers["X-Jarvis-Token"] = TOKEN
+    vid = new_visit(c).json()["id"]
+    # llegan desordenados y reenviando uno (reintento tras un corte de red)
+    assert put(c, vid, 200, 1, b"B2").status_code == 200
+    assert put(c, vid, 200, 0, b"B1").status_code == 200
+    assert put(c, vid, 200, 0, b"B1").status_code == 200
+    assert put(c, vid, 100, 0, b"A1").status_code == 200   # sesión anterior (otra pulsación de «Grabar»)
+    c.post(f"/api/visits/{vid}/finish", data={"notes": ""})
+    v = c.get(f"/api/visits/{vid}").json()
+    assert v["status"] == "done", v["error"]
+    assert sorted(seen.values()) == [b"A1", b"B1B2"]       # cada sesión es un archivo, en orden
+    assert v["transcript"] == "texto1\ntexto2"
+    assert not (config.data_dir / "audio" / vid).exists()  # los trozos se limpian al unir
+    assert list((config.data_dir / "audio").iterdir()) == []
+
+
+def test_chunk_validation(client):
+    vid = new_visit(client).json()["id"]
+    assert put(client, vid, 1, 0, ctype="text/html").status_code == 415
+    assert put(client, vid, 1, 0, b"").status_code == 400
+    assert put(client, vid, 1, 0, b"0" * (2 * 1024 * 1024 + 1)).status_code == 413
+    assert put(client, vid, 1, -1).status_code == 400
+    assert put(client, "no-existe-1234", 1, 0).status_code == 404
+    # tope total (max_audio_mb=1 en los tests)
+    assert put(client, vid, 1, 0, b"0" * 700_000).status_code == 200
+    assert put(client, vid, 1, 1, b"0" * 700_000).status_code == 413
+
+
+def test_chunks_rejected_once_processing_done(client):
+    vid = new_visit(client).json()["id"]
+    client.post(f"/api/visits/{vid}/finish", data={"notes": "n"})
+    assert put(client, vid, 1, 0).status_code == 409

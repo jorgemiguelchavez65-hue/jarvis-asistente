@@ -17,7 +17,7 @@ def process_visit(store: VisitStore, visit_id: str, *, claude, model: str, trans
         visit = store.get(visit_id)
         audio = store.audio_files(visit_id)
         if audio:
-            transcript = transcriber.transcribe(audio[0])
+            transcript = "\n".join(t for t in (transcriber.transcribe(f).strip() for f in audio) if t)
             visit = store.update(visit_id, transcript=transcript)  # se guarda antes de llamar a Claude
             if not keep_audio:
                 for f in audio:
