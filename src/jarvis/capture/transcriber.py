@@ -25,7 +25,9 @@ class WhisperTranscriber:
                 try:
                     from faster_whisper import WhisperModel
                 except ImportError as exc:
-                    raise RuntimeError("Falta faster-whisper: pip install -e '.[audio]'") from exc
+                    raise RuntimeError(
+                        "Falta faster-whisper (JARVIS_STT=local). En Render usa JARVIS_STT=api; "
+                        "en una máquina propia: pip install '.[audio]'") from exc
                 self._model = WhisperModel(self._size, compute_type="int8")
             segments, _ = self._model.transcribe(str(audio_path), language=self._language,
                                                  vad_filter=True)

@@ -151,3 +151,35 @@ def test_build_app_validates_configuration(monkeypatch):
     monkeypatch.setenv("JARVIS_STT", "otra")
     with pytest.raises(RuntimeError, match="local' o 'api"):
         main.build_app()
+
+
+def test_local_stt_without_whisper_fails_at_startup_with_actionable_message(monkeypatch):
+    """La causa real de 'falta faster-whisper' en Render: JARVIS_STT quedó en su valor por defecto (local)."""
+    import importlib.util
+
+    from jarvis.web import main
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a, **k: None if name == "faster_whisper" else real(name, *a, **k))
+    monkeypatch.delenv("JARVIS_STT", raising=False)          # sin definir => "local"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("JARVIS_ACCESS_TOKEN", "t" * 24)
+    with pytest.raises(RuntimeError, match="JARVIS_STT=api") as exc:
+        main.build_app()
+    assert "JARVIS_STT_API_KEY" in str(exc.value)
+
+
+def test_api_stt_does_not_need_whisper(monkeypatch, tmp_path):
+    import importlib.util
+
+    from jarvis.web import main
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a, **k: None if name == "faster_whisper" else real(name, *a, **k))
+    for k, v in {"JARVIS_STT": "api", "JARVIS_STT_BASE_URL": "http://x/v1", "JARVIS_STT_API_KEY": "k",
+                 "JARVIS_STT_MODEL": "m", "ANTHROPIC_API_KEY": "x", "JARVIS_ACCESS_TOKEN": "t" * 24,
+                 "JARVIS_BACKEND": "local", "JARVIS_DATA_DIR": str(tmp_path)}.items():
+        monkeypatch.setenv(k, v)
+    assert main.build_app() is not None

@@ -61,6 +61,7 @@ Y en **Environment**, **las 8 variables a mano** (en un Blueprint 5 vienen ya pu
 Errores típicos:
 - **`can't open file '.../app.py'`**: el Start Command es `python app.py` (el valor por defecto de algunos servicios). Ponlo en `jarvis-server`. Desde esta versión, además, existe un `app.py` en la raíz que arranca el servidor, así que ese comando también funciona.
 - **`ModuleNotFoundError` (fastapi, psycopg…)**: el Build Command no instaló los extras. Un `poetry install` o un `pip install .` a secas **no** los instalan; usa `pip install ".[render]"`. Render no necesita Poetry ni el `poetry.lock`.
+- **«Falta faster-whisper» al generar el informe** (o, en versiones nuevas, el servidor ni arranca con ese mensaje): `JARVIS_STT` no está definida y por defecto vale `local`, que usa Whisper dentro del servidor, algo que el plan gratis no puede. Define `JARVIS_STT=api` junto con `JARVIS_STT_BASE_URL`, `JARVIS_STT_MODEL` y `JARVIS_STT_API_KEY`, guarda (Render redespliega) y pulsa **Reintentar** en la visita: el audio sigue guardado, no hace falta grabar de nuevo.
 - **`Faltan variables para JARVIS_STT=api` / `Falta DATABASE_URL`**: faltan variables en Environment (tabla de arriba).
 - **El servicio no pasa el health check**: mira **Logs**; casi siempre es una variable faltante.
 

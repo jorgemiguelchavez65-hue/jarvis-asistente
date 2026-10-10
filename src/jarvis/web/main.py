@@ -1,6 +1,7 @@
 """Punto de entrada del servidor: `jarvis-server` o `python -m jarvis.web.main`."""
 from __future__ import annotations
 
+import importlib.util
 import os
 
 from jarvis.ai import ClaudeClient
@@ -20,6 +21,13 @@ def build_transcriber(config: Config):
         return ApiTranscriber(config.stt_base_url, config.stt_api_key, config.stt_model)
     if config.stt != "local":
         raise RuntimeError("JARVIS_STT debe ser 'local' o 'api'.")
+    if importlib.util.find_spec("faster_whisper") is None:
+        # Mejor fallar al arrancar que al terminar la primera visita real.
+        raise RuntimeError(
+            "JARVIS_STT=local necesita faster-whisper, que no está instalado. "
+            "En Render (plan gratis) usa JARVIS_STT=api y define JARVIS_STT_BASE_URL, "
+            "JARVIS_STT_MODEL y JARVIS_STT_API_KEY; en una máquina propia instala "
+            "pip install '.[server]'.")
     from jarvis.capture import WhisperTranscriber
 
     return WhisperTranscriber(config.whisper_model)

@@ -20,7 +20,8 @@ def test_root_app_py_exists_and_exposes_main():
 
 
 def test_uvicorn_attribute_builds_the_real_app(monkeypatch, tmp_path):
-    for k, v in {"JARVIS_BACKEND": "local", "JARVIS_STT": "local", "ANTHROPIC_API_KEY": "x",
+    for k, v in {"JARVIS_BACKEND": "local", "JARVIS_STT": "api", "JARVIS_STT_BASE_URL": "http://x/v1",
+                 "JARVIS_STT_API_KEY": "k", "JARVIS_STT_MODEL": "m", "ANTHROPIC_API_KEY": "x",
                  "JARVIS_ACCESS_TOKEN": "t" * 24, "JARVIS_DATA_DIR": str(tmp_path)}.items():
         monkeypatch.setenv(k, v)
     from fastapi import FastAPI
