@@ -9,3 +9,5 @@ data/*
 !data/.gitkeep
 informes/
 *-debug.log
+build/
+dist/
