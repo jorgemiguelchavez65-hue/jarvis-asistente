@@ -33,6 +33,37 @@ El plan gratis de Render es muy pequeño (según lo que sé: ~512 MB de RAM, 0.1
 4. Abre `https://jarvis-XXXX.onrender.com` (la URL aparece arriba en el panel del servicio), inicia sesión e instálala:
    **iPhone (Safari)**: Compartir → «Añadir a pantalla de inicio». **Android (Chrome)**: menú → «Instalar app».
 
+## Si creaste el servicio a mano (sin Blueprint)
+`render.yaml` **solo se lee con New → Blueprint**. En un servicio creado con **New → Web Service**, Render usa lo que haya en los campos del panel, y nada de `render.yaml` se aplica (ni los comandos ni las variables). Configura esto en el servicio (**Settings**):
+
+| Campo | Valor |
+|---|---|
+| Language / Runtime | `Python 3` |
+| Branch | `main` |
+| **Build Command** | `pip install ".[render]"` (equivale a `pip install -r requirements.txt`) |
+| **Start Command** | `jarvis-server` |
+| Health Check Path | `/healthz` |
+| Instance Type | Free |
+
+Y en **Environment**, **las 8 variables a mano** (en un Blueprint 5 vienen ya puestas):
+
+| Variable | Valor |
+|---|---|
+| `JARVIS_BACKEND` | `postgres` |
+| `DATABASE_URL` | cadena de Neon (con `sslmode=require`) |
+| `JARVIS_STT` | `api` |
+| `JARVIS_STT_BASE_URL` | `https://api.groq.com/openai/v1` |
+| `JARVIS_STT_MODEL` | `whisper-large-v3-turbo` |
+| `JARVIS_STT_API_KEY` | clave de Groq |
+| `ANTHROPIC_API_KEY` | clave de Claude |
+| `JARVIS_ACCESS_TOKEN` | una contraseña larga inventada por ti (`jarvis token` genera una) |
+
+Errores típicos:
+- **`can't open file '.../app.py'`**: el Start Command es `python app.py` (el valor por defecto de algunos servicios). Ponlo en `jarvis-server`. Desde esta versión, además, existe un `app.py` en la raíz que arranca el servidor, así que ese comando también funciona.
+- **`ModuleNotFoundError` (fastapi, psycopg…)**: el Build Command no instaló los extras. Un `poetry install` o un `pip install .` a secas **no** los instalan; usa `pip install ".[render]"`. Render no necesita Poetry ni el `poetry.lock`.
+- **`Faltan variables para JARVIS_STT=api` / `Falta DATABASE_URL`**: faltan variables en Environment (tabla de arriba).
+- **El servicio no pasa el health check**: mira **Logs**; casi siempre es una variable faltante.
+
 ## Límites del plan gratis que vas a notar
 - **El servicio se duerme tras ~15 min sin tráfico y tarda hasta ~1 min en despertar.** **Abre la app 2 minutos antes de entrar a la visita.** Durante una grabación, los trozos de audio (uno cada ~10 s) lo mantienen despierto. La app avisa «Conectando…» mientras despierta.
 - **Si cierras la app justo al terminar**, el informe se genera en segundo plano, pero la instancia puede dormirse antes de acabar. No se pierde nada: el estado está en Postgres y **al volver a abrir la app el servicio despierta y retoma el trabajo** pendiente. Para visitas importantes, espera a ver «informe listo».

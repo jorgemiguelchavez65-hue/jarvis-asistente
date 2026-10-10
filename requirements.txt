@@ -1,0 +1,3 @@
+# Para hostings que instalan con `pip install -r requirements.txt` (p. ej. Render por defecto).
+# Instala Jarvis con lo necesario para el servidor en la nube (sin Whisper local).
+.[render]

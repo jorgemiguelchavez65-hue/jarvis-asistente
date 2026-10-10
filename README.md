@@ -26,6 +26,8 @@ Despliegue en Render, límites del plan gratis y qué está verificado: [docs/DE
 
 ## Estructura
 ```
+app.py             arranque de compatibilidad (`python app.py` / `uvicorn app:app`)
+requirements.txt   instala `.[render]` para hostings que usan `pip install -r`
 src/jarvis/
   web/            servidor (FastAPI), almacenes (local / Postgres) y app del teléfono (web/static)
   ai/             Claude: informe de visita y consultas en vivo
